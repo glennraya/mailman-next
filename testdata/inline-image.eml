@@ -1,0 +1,30 @@
+From: Studio <studio@acme.test>
+To: Glenn Raya <glenn@myapp.test>
+Subject: Your proof is ready
+Message-ID: <proof-9@acme.test>
+Date: Mon, 07 Sep 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed-boundary"
+
+--mixed-boundary
+Content-Type: multipart/related; boundary="rel-boundary"
+
+--rel-boundary
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Here it is:</p><img src="cid:proof-image@acme.test"></body></html>
+--rel-boundary
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <proof-image@acme.test>
+Content-Disposition: inline; filename="proof.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==
+--rel-boundary--
+--mixed-boundary
+Content-Type: application/pdf
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="invoice.pdf"
+
+JVBERi0xLjQgZmFrZSBpbnZvaWNl
+--mixed-boundary--

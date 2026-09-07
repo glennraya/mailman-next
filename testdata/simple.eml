@@ -1,0 +1,19 @@
+From: Acme Billing <billing@acme.test>
+To: Glenn Raya <glenn@myapp.test>
+Cc: Accounts <accounts@myapp.test>
+Reply-To: order-4471@mail.acme.test
+Subject: Order 4471 has shipped
+Message-ID: <order-4471@acme.test>
+Date: Mon, 07 Sep 2026 09:14:22 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-boundary"
+
+--alt-boundary
+Content-Type: text/plain; charset=utf-8
+
+Your order 4471 is on its way. Reply to this email if anything looks wrong.
+--alt-boundary
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Your order <strong>4471</strong> is on its way.</p></body></html>
+--alt-boundary--

@@ -1,0 +1,60 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l cmd internal web)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Test
+        run: go test -race ./...
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+      # The binary embeds web/dist, so a stale committed build would ship a
+      # UI that does not match the source. Fail here rather than in a release.
+      - name: Check the committed UI build is current
+        run: |
+          if ! git diff --quiet -- dist; then
+            echo "web/dist is out of date. Run 'make ui' and commit the result."
+            git diff --stat -- dist
+            exit 1
+          fi

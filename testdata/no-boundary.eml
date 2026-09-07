@@ -1,0 +1,8 @@
+From: Broken Sender <broken@acme.test>
+To: glenn@myapp.test
+Subject: Password reset
+Message-ID: <broken-1@acme.test>
+MIME-Version: 1.0
+Content-Type: multipart/alternative
+
+This message declares multipart but never opens a boundary.

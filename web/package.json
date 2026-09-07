@@ -1,0 +1,26 @@
+{
+  "name": "mailman-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "types:check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "^0.475.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.11",
+    "@types/node": "^26.4.1",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "tailwindcss": "^4.1.11",
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0"
+  }
+}

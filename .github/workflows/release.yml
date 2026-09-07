@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Build the UI
+        run: cd web && npm ci && npm run build
+
+      # One job builds every platform: the SQLite driver is pure Go, so
+      # nothing here needs a matching C toolchain.
+      - name: Cross-compile
+        run: make dist
+
+      - name: Checksums
+        run: cd build/dist && sha256sum * > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: build/dist/*
+          generate_release_notes: true

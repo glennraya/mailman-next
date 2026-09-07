@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mailman</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script>
+      // Applied before first paint so a dark-mode reload does not flash white.
+      try {
+        const stored = localStorage.getItem('mailman:theme')
+        const dark = stored === 'dark' ||
+          (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.classList.toggle('dark', dark)
+      } catch {}
+    </script>
+    <script type="module" crossorigin src="/assets/index-rd22H-zR.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BnFbNiFn.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
