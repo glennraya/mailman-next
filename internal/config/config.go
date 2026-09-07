@@ -20,13 +20,15 @@ import (
 	"time"
 )
 
-// Defaults. The ports are the ones every framework's documentation already
-// uses for a local mail catcher, so pointing a project at Mailman takes no
-// thought. They collide with a running Mailpit by design -- Mailman replaces
-// it -- and both move with a single flag.
+// Defaults. Deliberately not 1025/8025: that is where Mailpit and MailHog
+// listen, and a developer trying Mailman usually still has one of them
+// running. Sharing their ports means whichever started first wins, or worse,
+// both bind and mail goes to whichever the sender happened to resolve to.
+// Sitting alongside them costs one line of config and removes a whole class
+// of "where did my mail go".
 const (
-	DefaultHTTPAddr    = "127.0.0.1:8025"
-	DefaultSMTPAddr    = "127.0.0.1:1025"
+	DefaultHTTPAddr    = "127.0.0.1:8983"
+	DefaultSMTPAddr    = "127.0.0.1:1983"
 	DefaultMaxSize     = 25 << 20 // 25 MiB, matching what most providers accept
 	DefaultTimeout     = 5 * time.Second
 	DefaultFormat      = FormatGeneric

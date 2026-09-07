@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -116,9 +117,22 @@ func run() error {
 		Logger:   logger,
 	})
 
-	// Both ports are bound before either starts serving, so a port already
-	// in use fails startup outright instead of leaving Mailman half up with
-	// one listener running.
+	// Binding is not enough to tell whether a port is free. On macOS a
+	// listener on 127.0.0.1:1025 binds cleanly alongside another process
+	// holding *:1025, so Mailman and a running Mailpit would both start and which
+	// one receives a message depends on whether the sender resolved to IPv4
+	// or IPv6. Mail then vanishes into the other tool with nothing logged
+	// anywhere. Checking first turns that into a startup error.
+	if err := ensureAvailable("SMTP", cfg.SMTPAddr); err != nil {
+		return err
+	}
+	if err := ensureAvailable("HTTP", cfg.HTTPAddr); err != nil {
+		return err
+	}
+
+	// Both ports are bound before either starts serving, so a port that is
+	// taken between the check above and here still fails startup outright
+	// rather than leaving Mailman half up with one listener running.
 	captureListener, err := capture.Listen()
 	if err != nil {
 		return err
@@ -176,4 +190,32 @@ func run() error {
 	defer cancel()
 
 	return server.Shutdown(shutdownCtx)
+}
+
+// ensureAvailable reports an error when something is already serving addr.
+//
+// It dials rather than binds because a bind can succeed against an address
+// another process is already answering on -- see the call site. A dial that
+// connects proves someone is there, whatever address family they bound.
+func ensureAvailable(what, addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s address %q is not host:port: %w", what, addr, err)
+	}
+	// Port 0 means "give me any free port", so there is nothing to check.
+	if port == "0" {
+		return nil
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err != nil {
+		return nil
+	}
+	conn.Close()
+
+	return fmt.Errorf(
+		"%s port %s is already serving. Another mail catcher (Mailpit or MailHog "+
+			"listen here by default) is most likely running. Stop it, or move Mailman "+
+			"with -%s",
+		what, addr, strings.ToLower(what))
 }

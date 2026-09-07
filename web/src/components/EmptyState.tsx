@@ -7,7 +7,7 @@ import type { ServerConfig } from '../types'
  * the next step obvious: point a project at the capture port.
  */
 export function EmptyState({ config }: { config: ServerConfig | null }) {
-  const [host, port] = (config?.smtp_addr ?? '127.0.0.1:1025').split(':')
+  const [host, port] = (config?.smtp_addr ?? '127.0.0.1:1983').split(':')
 
   return (
     <div className="flex h-full items-center justify-center p-8">

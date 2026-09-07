@@ -23,7 +23,7 @@ nothing else to install — no PHP, no Node, no database.
 mailman
 ```
 
-Open <http://127.0.0.1:8025>. The first run creates `~/.mailman/` for the
+Open <http://127.0.0.1:8983>. The first run creates `~/.mailman/` for the
 database, the captured mail and an optional config file.
 
 ## Point a project at it
@@ -31,7 +31,7 @@ database, the captured mail and an optional config file.
 ```env
 MAIL_MAILER=smtp
 MAIL_HOST=127.0.0.1
-MAIL_PORT=1025
+MAIL_PORT=1983
 MAIL_ENCRYPTION=null
 ```
 
@@ -47,13 +47,18 @@ WordPress SMTP plugins reach for it first.
 One binary, one process, two listeners over one SQLite file:
 
 ```
-127.0.0.1:1025    SMTP capture
-127.0.0.1:8025    inbox UI, JSON API and event stream
+127.0.0.1:1983    SMTP capture
+127.0.0.1:8983    inbox UI, JSON API and event stream
 ~/.mailman/       mailman.db, mail/, config.json
 ```
 
 Move either with `-smtp` / `-http`, or with `MAILMAN_SMTP_ADDR` /
 `MAILMAN_HTTP_ADDR`. `-home` (or `MAILMAN_HOME`) relocates the data directory.
+
+Mailman deliberately avoids 1025 and 8025, so it can sit alongside a Mailpit
+or MailHog you already have running rather than fighting it for the port. If
+something is already serving one of Mailman's ports, startup fails with a
+message saying so — it never starts half-working.
 
 The inbox updates over a WebSocket, so captured mail appears the moment it
 arrives rather than on a poll.
@@ -147,7 +152,7 @@ make dist           # cross-compile all five platforms
 For frontend work, run the server and the Vite dev server side by side:
 
 ```bash
-make dev            # Go server on :8025
+make dev            # Go server on :8983
 make dev-ui         # Vite on :5173, proxying the API and the WebSocket
 ```
 
