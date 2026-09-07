@@ -1,4 +1,4 @@
-import type { ConversationDetail, ConversationList, Message, ServerConfig } from './types'
+import type { ConversationDetail, ConversationList, Message, ServerConfig } from '@/types'
 
 // In development the Vite proxy forwards these to the Go server; in the
 // built binary the SPA and the API share an origin, so a relative path is
@@ -67,8 +67,8 @@ export const api = {
 
   // Served as documents and files rather than JSON, so these are URLs the
   // browser fetches directly.
-  htmlUrl: (id: string, showRemoteImages: boolean) =>
-    `${BASE}/messages/${id}/html${showRemoteImages ? '?images=1' : ''}`,
+  htmlUrl: (id: string, blockRemoteImages = false) =>
+    `${BASE}/messages/${id}/html${blockRemoteImages ? '?images=0' : ''}`,
   rawUrl: (id: string) => `${BASE}/messages/${id}/raw`,
   attachmentUrl: (id: number) => `${BASE}/attachments/${id}`,
 }

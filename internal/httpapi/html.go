@@ -24,17 +24,20 @@ func (s *Server) getMessageHTML(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remote images are blocked by default. A tracking pixel in a captured
-	// message would otherwise tell its sender that a developer opened it,
-	// which is a real leak from a tool that is supposed to be a dead end.
-	allowRemoteImages := r.URL.Query().Get("images") == "1"
+	// Remote images load by default: seeing a template the way its recipients
+	// will is most of the reason to open it here. The per-message toggle sends
+	// images=0 to put the block back, which is what a captured message
+	// carrying a tracking pixel deserves -- fetching one would tell its sender
+	// a developer read it. images=1 still means allow, so anything already
+	// pointing at this endpoint keeps working.
+	blockRemoteImages := r.URL.Query().Get("images") == "0"
 
 	body := renderBody(message)
 	body = rewriteInlineImages(body, message.Attachments)
 
-	imagePolicy := "img-src 'self' data:"
-	if allowRemoteImages {
-		imagePolicy = "img-src * data:"
+	imagePolicy := "img-src * data:"
+	if blockRemoteImages {
+		imagePolicy = "img-src 'self' data:"
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

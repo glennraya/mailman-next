@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Moon, Search, Sun, Trash2 } from 'lucide-react'
+import { Moon, Search, Sun, X } from 'lucide-react'
 
-import { api } from './api'
-import { ConversationList } from './components/ConversationList'
-import { EmptyState } from './components/EmptyState'
-import { ThreadView } from './components/ThreadView'
-import { useMailboxEvents } from './useMailboxEvents'
-import { useTheme } from './useTheme'
-import type { ConversationDetail, ConversationSummary, MailboxEvent, ServerConfig } from './types'
+import { api } from '@/api'
+import { ComposeModal } from '@/components/ComposeModal'
+import { EmptyState } from '@/components/EmptyState'
+import { SearchModal } from '@/components/SearchModal'
+import { Sidebar } from '@/components/Sidebar'
+import { ThreadView } from '@/components/ThreadView'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Kbd, KbdGroup } from '@/components/ui/kbd'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { useMailboxEvents } from '@/useMailboxEvents'
+import { useTheme } from '@/useTheme'
+import type { ConversationDetail, ConversationSummary, MailboxEvent, ServerConfig } from '@/types'
 
 export default function App() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
@@ -16,9 +23,12 @@ export default function App() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [unread, setUnread] = useState(0)
   const [query, setQuery] = useState('')
+  const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [config, setConfig] = useState<ServerConfig | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [composeOpen, setComposeOpen] = useState(false)
   const [theme, toggleTheme] = useTheme()
 
   // Held in a ref so the event handler can read the current selection
@@ -34,6 +44,9 @@ export default function App() {
       const list = await api.conversations(search)
       setConversations(list.conversations)
       setUnread(list.unread)
+      // The client does not page yet, so a capped result set is something the
+      // search palette has to admit to rather than hide.
+      setHasMore(list.next_cursor !== undefined)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load the inbox')
@@ -62,7 +75,10 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    api.config().then(setConfig).catch(() => setConfig(null))
+    api
+      .config()
+      .then(setConfig)
+      .catch(() => setConfig(null))
   }, [])
 
   // Search is debounced so a query is not sent on every keystroke.
@@ -90,7 +106,10 @@ export default function App() {
       // Refresh the open thread only when the change was actually in it.
       const open = selectedRef.current
       if (open !== null && event.conversation_id === open) {
-        void api.conversation(open).then(setDetail).catch(() => {})
+        void api
+          .conversation(open)
+          .then(setDetail)
+          .catch(() => {})
       }
     },
     [loadConversations],
@@ -103,6 +122,21 @@ export default function App() {
   useEffect(() => {
     document.title = unread > 0 ? `(${unread}) Mailman` : 'Mailman'
   }, [unread])
+
+  // The one global shortcut. Compose keeps its own keystrokes -- a modal that
+  // is already open should not lose the field under the cursor.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k') return
+      if (composeOpen) return
+
+      event.preventDefault()
+      setSearchOpen(true)
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [composeOpen])
 
   const selectConversation = useCallback(
     (id: number) => {
@@ -136,8 +170,9 @@ export default function App() {
     [loadConversations],
   )
 
+  // The confirmation is an AlertDialog in the sidebar, so by the time this
+  // runs the question has already been answered.
   const clearMailbox = useCallback(async () => {
-    if (!confirm('Delete every captured message? This cannot be undone.')) return
     await api.clearMailbox()
     setSelectedId(null)
     setDetail(null)
@@ -155,71 +190,83 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center gap-3 border-b border-[var(--color-line)] px-4 py-3">
+      <header className="flex items-center gap-3 border-b px-4 py-3">
         <div className="flex items-center gap-2">
-          <span className="grid size-7 place-items-center rounded-md bg-[var(--color-accent)] text-xs font-bold text-white">
+          <span className="grid size-7 place-items-center rounded-md bg-primary text-xs font-bold text-primary-foreground">
             M
           </span>
           <span className="font-semibold">Mailman</span>
-          {unread > 0 && (
-            <span className="rounded-full bg-[var(--color-accent)] px-2 py-0.5 text-xs font-medium text-white">
-              {unread}
-            </span>
-          )}
+          {unread > 0 && <Badge>{unread}</Badge>}
         </div>
 
-        <div className="relative mx-auto w-full max-w-md">
-          <Search
-            className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-[var(--color-ink-muted)]"
-            aria-hidden
-          />
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search subjects, bodies and addresses"
-            aria-label="Search mail"
-            className="w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface-muted)] py-1.5 pr-3 pl-8 text-sm outline-none focus:border-[var(--color-accent)]"
-          />
+        {/* A button rather than an input: a real field that blurs itself into
+            a modal fights the screen reader for focus. */}
+        <div className="mx-auto flex w-full max-w-md items-center gap-1">
+          <Button
+            variant="outline"
+            className="min-w-0 flex-1 justify-start bg-muted font-normal text-muted-foreground"
+            onClick={() => setSearchOpen(true)}
+          >
+            <Search aria-hidden />
+            <span className={`min-w-0 flex-1 truncate text-left ${query ? 'text-foreground' : ''}`}>
+              {query || 'Search mail'}
+            </span>
+            <KbdGroup>
+              {shortcutKeys().map((key) => (
+                <Kbd key={key}>{key}</Kbd>
+              ))}
+            </KbdGroup>
+          </Button>
+          {query && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Clear search"
+              className="text-muted-foreground"
+              onClick={() => setQuery('')}
+            >
+              <X aria-hidden />
+            </Button>
+          )}
         </div>
 
         <div className="flex items-center gap-1">
           <ConnectionBadge status={status} />
-          <button
-            type="button"
-            onClick={clearMailbox}
-            title="Delete every captured message"
-            className="rounded p-2 text-[var(--color-ink-muted)] hover:bg-red-500/10 hover:text-red-500"
-          >
-            <Trash2 className="size-4" aria-hidden />
-          </button>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
-            className="rounded p-2 text-[var(--color-ink-muted)] hover:bg-[var(--color-surface-muted)]"
-          >
-            {theme === 'dark' ? <Sun className="size-4" aria-hidden /> : <Moon className="size-4" aria-hidden />}
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+                className="text-muted-foreground"
+                onClick={toggleTheme}
+              >
+                {theme === 'dark' ? <Sun aria-hidden /> : <Moon aria-hidden />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+            </TooltipContent>
+          </Tooltip>
         </div>
       </header>
 
       {error && (
-        <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-600 dark:text-red-400">
-          {error}
-        </div>
+        <Alert variant="destructive" className="rounded-none border-x-0 border-t-0">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
 
       <div className="flex min-h-0 flex-1">
-        <aside className="w-80 shrink-0 overflow-y-auto border-r border-[var(--color-line)]">
-          <ConversationList
-            conversations={conversations}
-            selectedId={selectedId}
-            loading={loading}
-            query={query}
-            onSelect={selectConversation}
-          />
-        </aside>
+        <Sidebar
+          conversations={conversations}
+          selectedId={selectedId}
+          loading={loading}
+          query={query}
+          onSelect={selectConversation}
+          onCompose={() => setComposeOpen(true)}
+          onClearMailbox={clearMailbox}
+        />
 
         <main className="min-w-0 flex-1 overflow-hidden">
           {detail ? (
@@ -235,19 +282,43 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Both modals stay mounted so a compose draft survives being closed. */}
+      <SearchModal
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        query={query}
+        onQueryChange={setQuery}
+        results={conversations}
+        loading={loading}
+        hasMore={hasMore}
+        onSelect={selectConversation}
+      />
+
+      <ComposeModal open={composeOpen} onClose={() => setComposeOpen(false)} />
     </div>
   )
+}
+
+/** The modifier the reader's own keyboard uses, split into pills. */
+function shortcutKeys(): string[] {
+  const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent)
+  return mac ? ['⌘', 'K'] : ['Ctrl', 'K']
 }
 
 function ConnectionBadge({ status }: { status: 'connecting' | 'live' | 'offline' }) {
   if (status === 'live') return null
 
   return (
-    <span
-      className="rounded px-2 py-1 text-xs text-[var(--color-ink-muted)]"
-      title="The live connection dropped; new mail will appear once it is back."
-    >
-      {status === 'connecting' ? 'Connecting…' : 'Reconnecting…'}
-    </span>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant="ghost" className="text-muted-foreground">
+          {status === 'connecting' ? 'Connecting…' : 'Reconnecting…'}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent>
+        The live connection dropped; new mail will appear once it is back.
+      </TooltipContent>
+    </Tooltip>
   )
 }

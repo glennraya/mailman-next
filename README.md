@@ -72,8 +72,9 @@ arrives rather than on a poll.
   blind-copied, and Mailman shows it. This can only be captured at receive
   time.
 - **Safe HTML** — bodies render in an iframe with no `allow-scripts` and a
-  strict `Content-Security-Policy`. Remote images are blocked by default, so
-  opening a message cannot tell its sender you read it. `cid:` images resolve
+  strict `Content-Security-Policy`. Remote images load so a template looks the
+  way its recipients will see it; one click per message blocks them again when
+  a tracking pixel should not learn that you opened it. `cid:` images resolve
   to their inline parts.
 - **Forgiving parsing** — malformed mail is stored and shown rather than
   dropped, and the verbatim `.eml` is always one click away.
@@ -127,7 +128,7 @@ No authentication — it is a localhost tool. Useful for CI assertions.
 | POST | `/api/v1/conversations/{id}/seen` | Mark a thread read |
 | GET | `/api/v1/messages/{id}` | One message |
 | GET | `/api/v1/messages/{id}/raw` | Verbatim `.eml` |
-| GET | `/api/v1/messages/{id}/html` | Sandboxed body (`?images=1` to allow remote images) |
+| GET | `/api/v1/messages/{id}/html` | Sandboxed body (`?images=0` to block remote images) |
 | POST | `/api/v1/messages/{id}/seen` | Mark one message read |
 | DELETE | `/api/v1/messages/{id}` | Delete one message |
 | POST | `/api/v1/messages` | Inject mail (`{raw}` or `{from,to[],subject,text,html}`) |

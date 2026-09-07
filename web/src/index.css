@@ -5,6 +5,8 @@
    its own previous bundle, emit extra CSS, and produce a different hash on
    every rebuild. */
 @import 'tailwindcss' source(none);
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
 
 @source '../index.html';
 @source '../src/**/*.{ts,tsx}';
@@ -14,41 +16,152 @@
    system setting. */
 @custom-variant dark (&:where(.dark, .dark *));
 
-@theme {
-  --color-surface: #ffffff;
-  --color-surface-muted: #fafafa;
-  --color-line: #e4e4e7;
-  --color-ink: #18181b;
-  --color-ink-muted: #71717a;
-  --color-accent: #2563eb;
+/* The palette is the one the app already had, wearing shadcn's names. Two of
+   those names are a trap worth spelling out: what this app calls the accent --
+   the near-black that fills buttons and the unread badge -- is shadcn's
+   --primary. shadcn's --accent is the hover surface, which is the muted grey.
+   Swapping the two inverts the whole interface.
+
+   The chrome is deliberately monochrome so the captured mail is the only
+   coloured thing on screen, and red stays reserved for destructive actions.
+
+   accent-soft is the selected-row tint, kept as a token of its own rather than
+   an opacity modifier on --primary: Tailwind bakes the light-mode value in as
+   the fallback, so a /10 would not follow the .dark override. It is also a
+   different colour from --accent on purpose -- selection and hover have to be
+   told apart. */
+:root {
+  --radius: 0.5rem;
+
+  --background: #ffffff;
+  --foreground: #18181b;
+  --card: #ffffff;
+  --card-foreground: #18181b;
+  --popover: #ffffff;
+  --popover-foreground: #18181b;
+  --primary: #18181b;
+  --primary-foreground: #ffffff;
+  --secondary: #fafafa;
+  --secondary-foreground: #18181b;
+  --muted: #fafafa;
+  --muted-foreground: #71717a;
+  --accent: #fafafa;
+  --accent-foreground: #18181b;
+  --accent-soft: #18181b14;
+  --destructive: #ef4444;
+  --border: #e4e4e7;
+  --input: #e4e4e7;
+  --ring: #18181b;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #18181b;
+  --sidebar-primary: #18181b;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #fafafa;
+  --sidebar-accent-foreground: #18181b;
+  --sidebar-border: #e4e4e7;
+  --sidebar-ring: #18181b;
 }
 
 .dark {
-  --color-surface: #09090b;
-  --color-surface-muted: #111113;
-  --color-line: #27272a;
-  --color-ink: #fafafa;
-  --color-ink-muted: #a1a1aa;
-  --color-accent: #60a5fa;
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #09090b;
+  --card-foreground: #fafafa;
+  --popover: #111113;
+  --popover-foreground: #fafafa;
+  --primary: #fafafa;
+  --primary-foreground: #09090b;
+  --secondary: #111113;
+  --secondary-foreground: #fafafa;
+  --muted: #111113;
+  --muted-foreground: #a1a1aa;
+  --accent: #111113;
+  --accent-foreground: #fafafa;
+  /* A heavier tint than the light theme's: it has to lift off near-black. */
+  --accent-soft: #fafafa1f;
+  --destructive: #f87171;
+  --border: #27272a;
+  --input: #27272a;
+  --ring: #fafafa;
+
+  --sidebar: #09090b;
+  --sidebar-foreground: #fafafa;
+  --sidebar-primary: #fafafa;
+  --sidebar-primary-foreground: #09090b;
+  --sidebar-accent: #111113;
+  --sidebar-accent-foreground: #fafafa;
+  --sidebar-border: #27272a;
+  --sidebar-ring: #fafafa;
 }
 
-html,
-body,
-#root {
-  height: 100%;
+@theme inline {
+  /* The system stack rather than a downloaded face: the UI is chrome around
+     someone else's mail, and it should look like the machine it runs on. */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-heading: var(--font-sans);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
 }
 
-body {
-  margin: 0;
-  background: var(--color-surface);
-  color: var(--color-ink);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  -webkit-font-smoothing: antialiased;
-}
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
 
-/* A thin scrollbar keeps the two list panes from feeling like separate
-   browser windows. */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-line) transparent;
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    @apply font-sans;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* A thin scrollbar keeps the two list panes from feeling like separate
+     browser windows. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
 }

@@ -1,4 +1,4 @@
-import type { MailAddress } from './types'
+import type { MailAddress } from '@/types'
 
 export function displayName(address?: MailAddress): string {
   if (!address) return 'Unknown sender'

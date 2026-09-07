@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { MailboxEvent } from './types'
+import type { MailboxEvent } from '@/types'
 
 type Status = 'connecting' | 'live' | 'offline'
 

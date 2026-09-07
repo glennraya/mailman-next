@@ -1,14 +1,17 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 
-import App from './App'
-import './index.css'
+import App from '@/App'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import '@/index.css'
 
 const container = document.getElementById('root')
 if (!container) throw new Error('no #root element to mount into')
 
 createRoot(container).render(
   <StrictMode>
-    <App />
+    <TooltipProvider>
+      <App />
+    </TooltipProvider>
   </StrictMode>,
 )
