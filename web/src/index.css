@@ -1,4 +1,13 @@
-@import 'tailwindcss';
+/* source(none) turns off Tailwind's automatic file detection, and the two
+   @source lines below put back exactly what should be scanned.
+   Without this, Tailwind walks the whole project -- including dist/, which is
+   committed so the Go binary can embed it. It would then find class names in
+   its own previous bundle, emit extra CSS, and produce a different hash on
+   every rebuild. */
+@import 'tailwindcss' source(none);
+
+@source '../index.html';
+@source '../src/**/*.{ts,tsx}';
 
 /* The theme toggle writes a class on <html>, so dark mode keys off that
    rather than the media query alone -- an explicit choice has to beat the
