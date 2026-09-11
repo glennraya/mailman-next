@@ -130,7 +130,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// "app" exists so a probe can tell a Mailman apart from anything else
+	// answering on the port. A plain 200 proves only that something is
+	// there; startup needs to know whether that something is us, because
+	// "Mailman is already running" and "Mailpit took your port" call for
+	// entirely different advice.
 	s.respond(w, r, http.StatusOK, map[string]any{
+		"app":       "mailman",
 		"status":    "ok",
 		"version":   s.version,
 		"unread":    unread,

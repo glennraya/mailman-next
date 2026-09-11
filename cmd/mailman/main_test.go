@@ -1,80 +1,49 @@
 package main
 
 import (
-	"net"
 	"strings"
 	"testing"
 )
 
-func TestEnsureAvailableAllowsAFreePort(t *testing.T) {
-	// Bind and release, so the address is known to have been usable and is
-	// now free again.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+// Adding subcommands must not cost the flags-only form anything. Every one of
+// these has shipped in the README, so any of them reaching the dispatch table
+// instead of serve would be a break.
+func TestSubcommandLeavesTheFlagsOnlyFormAlone(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "no arguments at all", args: nil, want: ""},
+		{name: "a single-dash flag", args: []string{"-v"}, want: ""},
+		{name: "a double-dash flag", args: []string{"--http", ":8383"}, want: ""},
+		{name: "a flag with an inline value", args: []string{"-http=:8383"}, want: ""},
+		{name: "a subcommand", args: []string{"service", "status"}, want: "service"},
+		{name: "the explicit serve command", args: []string{"serve", "-v"}, want: "serve"},
 	}
-	addr := listener.Addr().String()
-	listener.Close()
 
-	if err := ensureAvailable("SMTP", addr); err != nil {
-		t.Errorf("a free port was reported busy: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := subcommand(tt.args); got != tt.want {
+				t.Errorf("subcommand(%q) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
 	}
 }
 
-// TestEnsureAvailableRejectsAnOccupiedPort is the check that a plain bind
-// cannot make. On macOS a listener on 127.0.0.1:1983 binds happily next to
-// another process holding *:1983, so both processes start and mail goes to
-// whichever the sender's resolver happened to reach. Dialing catches it.
-func TestEnsureAvailableRejectsAnOccupiedPort(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer listener.Close()
-
-	err = ensureAvailable("SMTP", listener.Addr().String())
+func TestRunRejectsAnUnknownCommand(t *testing.T) {
+	err := run([]string{"nonsense"})
 	if err == nil {
-		t.Fatal("an occupied port was reported available")
+		t.Fatal("an unknown command was accepted")
 	}
-
-	// The message has to name the port and the way out, since this is the
-	// first thing a new user hits when they already run Mailpit.
-	for _, want := range []string{listener.Addr().String(), "Mailpit", "-smtp"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
-		}
+	// A user who mistypes needs to be told where the list is.
+	if !strings.Contains(err.Error(), "mailman help") {
+		t.Errorf("error %q does not point at the help", err)
 	}
 }
 
-// A wildcard listener is the exact shape Mailpit uses, and the one a
-// loopback bind fails to conflict with.
-func TestEnsureAvailableSeesAWildcardListener(t *testing.T) {
-	listener, err := net.Listen("tcp", ":0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer listener.Close()
-
-	_, port, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatalf("split: %v", err)
-	}
-
-	if err := ensureAvailable("SMTP", "127.0.0.1:"+port); err == nil {
-		t.Error("a wildcard listener on the same port was not detected")
-	}
-}
-
-func TestEnsureAvailableSkipsEphemeralPorts(t *testing.T) {
-	// Port 0 means "any free port", so there is nothing to probe. The
-	// end-to-end tests rely on this.
-	if err := ensureAvailable("SMTP", "127.0.0.1:0"); err != nil {
-		t.Errorf("port 0 was probed: %v", err)
-	}
-}
-
-func TestEnsureAvailableRejectsAMalformedAddress(t *testing.T) {
-	if err := ensureAvailable("SMTP", "not-an-address"); err == nil {
-		t.Error("a malformed address was accepted")
+func TestRunRejectsServiceWithNoCommand(t *testing.T) {
+	if err := run([]string{"service"}); err == nil {
+		t.Error("`mailman service` with no command was accepted")
 	}
 }

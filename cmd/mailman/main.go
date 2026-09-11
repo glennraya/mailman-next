@@ -6,216 +6,93 @@
 package main
 
 import (
-	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"log/slog"
-	"net"
-	"net/http"
+	"io"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
-	"time"
-
-	"github.com/glennraya/mailman/internal/config"
-	"github.com/glennraya/mailman/internal/events"
-	"github.com/glennraya/mailman/internal/httpapi"
-	"github.com/glennraya/mailman/internal/mailmime"
-	"github.com/glennraya/mailman/internal/mailstore"
-	"github.com/glennraya/mailman/internal/smtpd"
-	"github.com/glennraya/mailman/web"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "mailman:", err)
-		os.Exit(1)
+	err := run(os.Args[1:])
+	if err == nil {
+		return
 	}
+
+	fmt.Fprintln(os.Stderr, "mailman:", err)
+
+	// A supervised Mailman that cannot have its ports has not crashed, and
+	// restarting it will not help until a human moves whatever is in the
+	// way. Exiting zero is how that gets said: launchd's
+	// KeepAlive/SuccessfulExit=false and systemd's Restart=on-failure both
+	// read a clean exit as "leave it alone", which turns what would be a
+	// restart every few seconds, forever, into one logged explanation.
+	var conflict *portConflict
+	if errors.As(err, &conflict) && conflict.supervised {
+		os.Exit(0)
+	}
+
+	os.Exit(1)
 }
 
-func run() error {
-	// Every flag defaults to its zero value so flag.Visit can tell which
-	// ones were actually given; the real defaults live in the config layer,
-	// which the file and environment also feed into.
-	var (
-		httpAddr = flag.String("http", "", "address for the inbox, API and event stream (default "+config.DefaultHTTPAddr+")")
-		smtpAddr = flag.String("smtp", "", "address for the SMTP capture server (default "+config.DefaultSMTPAddr+")")
-		home     = flag.String("home", "", "data directory (default ~/.mailman)")
-		maxSize  = flag.Int64("max-size", 0, "largest message to accept, in bytes")
-		verbose  = flag.Bool("v", false, "log every request")
-		showVer  = flag.Bool("version", false, "print the version and exit")
-	)
-	flag.Parse()
-
-	if *showVer {
-		fmt.Println("mailman", version)
-		return nil
-	}
-
-	// -home has to be applied before the config loads, since it decides
-	// which directory the config file is read from.
-	if *home != "" {
-		if err := os.Setenv("MAILMAN_HOME", *home); err != nil {
-			return fmt.Errorf("set data directory: %w", err)
-		}
-	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-
-	flag.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "http":
-			cfg.HTTPAddr = *httpAddr
-		case "smtp":
-			cfg.SMTPAddr = *smtpAddr
-		case "max-size":
-			cfg.MaxMessageBytes = *maxSize
-		}
-	})
-
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-
-	level := slog.LevelInfo
-	if *verbose {
-		level = slog.LevelDebug
-	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-
-	store, err := mailstore.Open(cfg.DBPath(), cfg.MailDir())
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-
-	broker := events.New()
-	ingestor := mailmime.NewIngestor(store, broker, logger)
-
-	capture := smtpd.New(smtpd.Options{
-		Addr:            cfg.SMTPAddr,
-		MaxMessageBytes: cfg.MaxMessageBytes,
-		Ingestor:        ingestor,
-		Logger:          logger,
-	})
-
-	api := httpapi.New(httpapi.Options{
-		Store:    store,
-		Broker:   broker,
-		Config:   cfg,
-		Ingestor: ingestor,
-		Assets:   web.Handler(),
-		Version:  version,
-		Logger:   logger,
-	})
-
-	// Binding is not enough to tell whether a port is free. On macOS a
-	// listener on 127.0.0.1:1025 binds cleanly alongside another process
-	// holding *:1025, so Mailman and a running Mailpit would both start and which
-	// one receives a message depends on whether the sender resolved to IPv4
-	// or IPv6. Mail then vanishes into the other tool with nothing logged
-	// anywhere. Checking first turns that into a startup error.
-	if err := ensureAvailable("SMTP", cfg.SMTPAddr); err != nil {
-		return err
-	}
-	if err := ensureAvailable("HTTP", cfg.HTTPAddr); err != nil {
-		return err
-	}
-
-	// Both ports are bound before either starts serving, so a port that is
-	// taken between the check above and here still fails startup outright
-	// rather than leaving Mailman half up with one listener running.
-	captureListener, err := capture.Listen()
-	if err != nil {
-		return err
-	}
-
-	httpListener, err := net.Listen("tcp", cfg.HTTPAddr)
-	if err != nil {
-		captureListener.Close()
-		return fmt.Errorf("listen for HTTP on %s: %w", cfg.HTTPAddr, err)
-	}
-
-	server := &http.Server{
-		Handler: api.Handler(),
-		// The event stream is a long-lived connection, so there is no
-		// whole-request timeout here; only the headers are bounded.
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	failed := make(chan error, 2)
-
-	go func() {
-		if err := capture.Serve(ctx, captureListener); err != nil {
-			failed <- err
-		}
-	}()
-
-	go func() {
-		if err := server.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			failed <- fmt.Errorf("http server: %w", err)
-		}
-	}()
-
-	logger.Info("mailman ready",
-		"inbox", "http://"+httpListener.Addr().String(),
-		"smtp", capture.Addr(),
-		"data", cfg.Home,
-		"version", version)
-
-	if !cfg.WebhookEnabled() {
-		logger.Info("replies will not be forwarded: no webhook configured",
-			"config", cfg.ConfigPath())
-	}
-
-	select {
-	case err := <-failed:
-		return err
-	case <-ctx.Done():
-		logger.Info("shutting down")
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	return server.Shutdown(shutdownCtx)
-}
-
-// ensureAvailable reports an error when something is already serving addr.
+// run dispatches on the first argument.
 //
-// It dials rather than binds because a bind can succeed against an address
-// another process is already answering on -- see the call site. A dial that
-// connects proves someone is there, whatever address family they bound.
-func ensureAvailable(what, addr string) error {
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("%s address %q is not host:port: %w", what, addr, err)
-	}
-	// Port 0 means "give me any free port", so there is nothing to check.
-	if port == "0" {
+// A subcommand can only ever be a bare word in first position, so every
+// existing invocation still reaches serve: `mailman`, `mailman -v` and
+// `mailman --http=:8383` all begin with either nothing or a dash.
+func run(args []string) error {
+	switch subcommand(args) {
+	case "":
+		return serve(args)
+	case "serve":
+		return serve(args[1:])
+	case "service":
+		return serviceCommand(args[1:])
+	case "help":
+		usage(os.Stdout)
 		return nil
+	default:
+		return fmt.Errorf("unknown command %q -- try `mailman help`", args[0])
+	}
+}
+
+// subcommand reports which command args names, or "" for the flags-only form
+// that serve handles. It is separate from run so the dispatch can be tested
+// without starting a server.
+func subcommand(args []string) string {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return ""
 	}
 
-	conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
-	if err != nil {
-		return nil
-	}
-	conn.Close()
+	return args[0]
+}
 
-	return fmt.Errorf(
-		"%s port %s is already serving. Another mail catcher (Mailpit or MailHog "+
-			"listen here by default) is most likely running. Stop it, or move Mailman "+
-			"with -%s",
-		what, addr, strings.ToLower(what))
+func usage(w io.Writer) {
+	fmt.Fprint(w, `Mailman captures mail from local projects and lets you reply to it.
+
+Usage:
+  mailman [flags]              capture mail and serve the inbox
+  mailman service <command>    run Mailman at login, in the background
+  mailman help                 this message
+
+Flags:
+  -http addr        address for the inbox, API and event stream
+  -smtp addr        address for the SMTP capture server
+  -home dir         data directory (default ~/.mailman)
+  -max-size bytes   largest message to accept
+  -v                log every request
+  -version          print the version and exit
+
+Service commands:
+  install    register Mailman to start at login, and start it now
+  uninstall  stop Mailman and remove the login registration
+  status     what is registered, what is running, what is answering
+  start      start the registered service
+  stop       stop it, leaving it registered
+
+Run "mailman service <command> -h" for the flags each one takes.
+`)
 }

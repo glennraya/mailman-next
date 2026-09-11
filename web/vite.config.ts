@@ -7,7 +7,7 @@ import { fileURLToPath, URL } from 'node:url'
 // stay there. In development Vite serves the UI on its own port and proxies
 // the API and the event stream to the Go server, which means the frontend
 // hot-reloads against real captured mail rather than a mock.
-const API_TARGET = process.env.MAILMAN_API ?? 'http://127.0.0.1:8983'
+const API_TARGET = process.env.MAILMAN_API ?? 'http://127.0.0.1:8383'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

@@ -16,15 +16,71 @@ Postmark would post it. Your existing production handler receives it unchanged.
 
 ## Install
 
-Grab the binary for your platform, make it executable, and run it. There is
-nothing else to install — no PHP, no Node, no database.
+One binary. Nothing else — no PHP, no Node, no database.
+
+**macOS, with Homebrew:**
 
 ```bash
-mailman
+brew install glennraya/tap/mailman
+mailman service install
 ```
 
-Open <http://127.0.0.1:8983>. The first run creates `~/.mailman/` for the
+**Linux, or macOS without Homebrew:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/glennraya/mailman-next/main/packaging/install.sh | sh
+mailman service install
+```
+
+**From source:**
+
+```bash
+make install        # builds, installs to ~/.local/bin, registers the service
+```
+
+**With Go:** `go install github.com/glennraya/mailman/cmd/mailman@latest` — the
+compiled UI is committed, so this needs no Node.
+
+Every route ends with the same second step, because none of the package
+managers will start a service for you. After it, Mailman is running and will
+be running again after your next login.
+
+Open <http://127.0.0.1:8383>. The first run creates `~/.mailman/` for the
 database, the captured mail and an optional config file.
+
+To run it in a terminal instead, without registering anything, just run
+`mailman`.
+
+## Run it at login
+
+```bash
+mailman service install     # register it and start it now
+mailman service status      # what is registered, running and answering
+mailman service stop        # stop it, leaving it registered
+mailman service start       # start it again
+mailman service uninstall   # stop it and remove the registration
+```
+
+| | macOS | Linux |
+|---|---|---|
+| Registered as | a launchd user agent | a systemd user service |
+| Unit file | `~/Library/LaunchAgents/com.glennraya.mailman.plist` | `~/.config/systemd/user/mailman.service` |
+| Output | `~/.mailman/mailman.log` | `journalctl --user -u mailman -f` |
+
+It runs as you, not as root, and only while you are logged in. On a headless
+Linux box where you want it up without a session, `loginctl enable-linger
+$USER` — `mailman service status` says so when that applies.
+
+Windows has no service registration yet. `mailman.exe` runs in a terminal.
+
+If something else already holds one of Mailman's ports, the service logs what
+it found and stays stopped rather than restarting every few seconds forever.
+Free the port, then `mailman service start`.
+
+`brew services` is deliberately not wired up. Mailman registers its own agent
+so one command works the same on both platforms, and two managers would fight
+over the same two ports — `mailman service install` refuses rather than join
+a fight it would half-win.
 
 ## Point a project at it
 
@@ -48,7 +104,7 @@ One binary, one process, two listeners over one SQLite file:
 
 ```
 127.0.0.1:1983    SMTP capture
-127.0.0.1:8983    inbox UI, JSON API and event stream
+127.0.0.1:8383    inbox UI, JSON API and event stream
 ~/.mailman/       mailman.db, mail/, config.json
 ```
 
@@ -58,7 +114,9 @@ Move either with `-smtp` / `-http`, or with `MAILMAN_SMTP_ADDR` /
 Mailman deliberately avoids 1025 and 8025, so it can sit alongside a Mailpit
 or MailHog you already have running rather than fighting it for the port. If
 something is already serving one of Mailman's ports, startup fails with a
-message saying so — it never starts half-working.
+message naming what it found — it never starts half-working. Running as a
+service, that same condition is a clean stop rather than a failure, so the
+login manager leaves it down instead of retrying forever.
 
 The inbox updates over a WebSocket, so captured mail appears the moment it
 arrives rather than on a poll.
@@ -147,13 +205,15 @@ loopback while you browse the rest of the web. Safe methods are unaffected.
 make install-ui     # npm install for the frontend
 make test           # Go suite plus the frontend type check
 make build          # UI + binary into build/mailman
+make install        # build, install to ~/.local/bin, register the service
 make dist           # cross-compile all five platforms
+make checksums      # what the install script verifies against
 ```
 
 For frontend work, run the server and the Vite dev server side by side:
 
 ```bash
-make dev            # Go server on :8983
+make dev            # Go server on :8383
 make dev-ui         # Vite on :5173, proxying the API and the WebSocket
 ```
 

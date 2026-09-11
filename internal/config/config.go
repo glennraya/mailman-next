@@ -26,8 +26,12 @@ import (
 // both bind and mail goes to whichever the sender happened to resolve to.
 // Sitting alongside them costs one line of config and removes a whole class
 // of "where did my mail go".
+//
+// 8383 is picked on the same principle: it is not a port any common
+// development service claims, so the inbox is reachable on a fresh machine
+// without an argument about who was there first.
 const (
-	DefaultHTTPAddr    = "127.0.0.1:8983"
+	DefaultHTTPAddr    = "127.0.0.1:8383"
 	DefaultSMTPAddr    = "127.0.0.1:1983"
 	DefaultMaxSize     = 25 << 20 // 25 MiB, matching what most providers accept
 	DefaultTimeout     = 5 * time.Second
