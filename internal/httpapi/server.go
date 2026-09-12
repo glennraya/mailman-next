@@ -36,31 +36,70 @@ type Ingestor interface {
 // test should not need a socket.
 type Deliverer interface {
 	Send(ctx context.Context, message *mailstore.Message, raw []byte, route config.Resolved) (*mailstore.Delivery, error)
+
+	// Probe posts without recording an attempt, for the settings page's
+	// test button.
+	Probe(ctx context.Context, message *mailstore.Message, raw []byte, route config.Resolved) (int, string, error)
+}
+
+// Listening is where the process actually bound, as opposed to what the
+// configuration asked for. They differ whenever a configured port is 0, and
+// after a settings change they differ until a restart -- which the settings
+// page has to be able to say plainly rather than report a port change as
+// already in effect.
+type Listening struct {
+	HTTP string
+	SMTP string
+
+	// Booted is the snapshot the listeners were bound from. Anything a
+	// restart is needed to change is compared against this rather than
+	// against the resolved address, which would differ forever on a
+	// configured port of 0.
+	Booted *config.Config
 }
 
 // Options wires the server.
 type Options struct {
-	Store    *mailstore.Store
-	Broker   *events.Broker
-	Config   *config.Config
-	Ingestor Ingestor
-	Webhook  Deliverer
-	Assets   http.Handler
-	Version  string
-	Logger   *slog.Logger
+	Store  *mailstore.Store
+	Broker *events.Broker
+
+	// Config is the first snapshot. Reload rebuilds one the way startup did,
+	// and is what the settings page calls after writing the config file; with
+	// no Reload the settings API refuses to write rather than save something
+	// that cannot take effect.
+	Config *config.Config
+	Reload func() (*config.Config, error)
+
+	Ingestor  Ingestor
+	Webhook   Deliverer
+	Assets    http.Handler
+	Version   string
+	Listening Listening
+	Logger    *slog.Logger
 }
 
 // Server holds the API's dependencies.
 type Server struct {
-	store    *mailstore.Store
-	broker   *events.Broker
-	config   *config.Config
-	ingestor Ingestor
-	webhook  Deliverer
-	assets   http.Handler
-	version  string
-	logger   *slog.Logger
+	store  *mailstore.Store
+	broker *events.Broker
+
+	// config is the published snapshot. Handlers read it through settings(),
+	// never as a mutable struct -- see config.Live.
+	config *config.Live
+	reload func() (*config.Config, error)
+
+	ingestor  Ingestor
+	webhook   Deliverer
+	assets    http.Handler
+	version   string
+	listening Listening
+	logger    *slog.Logger
 }
+
+// settings returns the configuration for one request. Read it once and use
+// that value throughout, so a save landing midway cannot show a handler half
+// of one configuration and half of another.
+func (s *Server) settings() *config.Config { return s.config.Get() }
 
 // New builds the server.
 func New(opts Options) *Server {
@@ -69,15 +108,22 @@ func New(opts Options) *Server {
 		logger = slog.Default()
 	}
 
+	cfg := opts.Config
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
 	return &Server{
-		store:    opts.Store,
-		broker:   opts.Broker,
-		config:   opts.Config,
-		ingestor: opts.Ingestor,
-		webhook:  opts.Webhook,
-		assets:   opts.Assets,
-		version:  opts.Version,
-		logger:   logger,
+		store:     opts.Store,
+		broker:    opts.Broker,
+		config:    config.NewLive(cfg),
+		reload:    opts.Reload,
+		ingestor:  opts.Ingestor,
+		webhook:   opts.Webhook,
+		assets:    opts.Assets,
+		version:   opts.Version,
+		listening: opts.Listening,
+		logger:    logger,
 	}
 }
 
@@ -88,7 +134,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
+	mux.HandleFunc("PUT /api/v1/config", s.saveConfig)
 	mux.HandleFunc("GET /api/v1/webhook/route", s.resolveRoute)
+	mux.HandleFunc("POST /api/v1/webhook/test", s.testWebhook)
 
 	mux.HandleFunc("GET /api/v1/conversations", s.listConversations)
 	mux.HandleFunc("GET /api/v1/conversations/{id}", s.getConversation)
@@ -156,37 +204,6 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"version":   s.version,
 		"unread":    unread,
 		"listeners": s.broker.Subscribers(),
-	})
-}
-
-// getConfig reports the settings the UI needs to explain itself: which
-// webhook routes exist, and therefore where a reply to a given address would
-// be delivered. Signing keys are omitted -- the UI never needs them, and they
-// would otherwise be readable by anything that can reach the API.
-func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
-	routes := make(map[string]any, len(s.config.Webhook.Routes))
-	for domain, route := range s.config.Webhook.Routes {
-		routes[domain] = map[string]any{
-			"url":        route.URL,
-			"format":     firstNonEmpty(route.Format, s.config.Webhook.Format),
-			"has_secret": route.SigningKey != "" || s.config.Webhook.SigningKey != "",
-		}
-	}
-
-	s.respond(w, r, http.StatusOK, map[string]any{
-		"version":           s.version,
-		"smtp_addr":         s.config.SMTPAddr,
-		"http_addr":         s.config.HTTPAddr,
-		"home":              s.config.Home,
-		"max_message_bytes": s.config.MaxMessageBytes,
-		"webhook": map[string]any{
-			"enabled":    s.config.WebhookEnabled(),
-			"url":        s.config.Webhook.URL,
-			"format":     s.config.Webhook.Format,
-			"verify_tls": s.config.VerifyTLS(),
-			"timeout_ms": s.config.Webhook.Timeout.Duration().Milliseconds(),
-			"routes":     routes,
-		},
 	})
 }
 

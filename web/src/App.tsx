@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Moon, Search, Sun, X } from 'lucide-react'
+import { Moon, Search, Settings2, Sun, X } from 'lucide-react'
 
 import { api } from '@/api'
 import { ComposeModal } from '@/components/ComposeModal'
 import { EmptyState } from '@/components/EmptyState'
 import { SearchModal } from '@/components/SearchModal'
+import { SettingsModal } from '@/components/SettingsModal'
 import { Sidebar } from '@/components/Sidebar'
 import { ThreadView } from '@/components/ThreadView'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -36,6 +37,10 @@ export default function App() {
   const [config, setConfig] = useState<ServerConfig | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [composeOpen, setComposeOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  // Bumped on a config.changed event, so a save in another tab reaches an
+  // open settings dialog.
+  const [settingsRevision, setSettingsRevision] = useState(0)
   const [replyTo, setReplyTo] = useState<Message | undefined>(undefined)
   // Bumped on every delivery.completed, which is how an open delivery log
   // refetches itself after a retry from another tab.
@@ -111,6 +116,17 @@ export default function App() {
 
       if (event.type === 'delivery.completed') {
         setDeliveryRevision((current) => current + 1)
+      }
+
+      // Settings are not mailbox news: refresh them and stop, rather than
+      // running a conversation query for a change that cannot affect one.
+      if (event.type === 'config.changed') {
+        setSettingsRevision((current) => current + 1)
+        void api
+          .config()
+          .then(setConfig)
+          .catch(() => {})
+        return
       }
 
       // The list is refetched rather than patched: it is one cheap query,
@@ -225,6 +241,8 @@ export default function App() {
     )
   }, [])
 
+  const openSettings = useCallback(() => setSettingsOpen(true), [])
+
   const toggleMessage = useCallback((id: string) => {
     setExpanded((current) => {
       const next = new Set(current)
@@ -283,6 +301,20 @@ export default function App() {
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label="Settings"
+                className="text-muted-foreground"
+                onClick={openSettings}
+              >
+                <Settings2 aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Where replies are delivered</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
                 aria-label={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
                 className="text-muted-foreground"
                 onClick={toggleTheme}
@@ -326,7 +358,7 @@ export default function App() {
               deliveryRevision={deliveryRevision}
             />
           ) : (
-            <EmptyState config={config} />
+            <EmptyState config={config} onOpenSettings={openSettings} />
           )}
         </main>
       </div>
@@ -348,6 +380,15 @@ export default function App() {
         onClose={() => setComposeOpen(false)}
         replyTo={replyTo}
         onSent={onSent}
+        onOpenSettings={openSettings}
+      />
+
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        config={config}
+        revision={settingsRevision}
+        onSaved={setConfig}
       />
     </div>
   )

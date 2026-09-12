@@ -156,6 +156,10 @@ arrives rather than on a poll.
 
 ## Features
 
+- **Settings in the browser** — set the webhook URL, format, signing key and
+  per-domain routes from the inbox. Webhook changes apply immediately, and a
+  Test button posts a synthetic message so a URL can be proved before a real
+  reply depends on it.
 - **The reply loop** — write a reply in the inbox and Mailman delivers it to
   your app as an inbound-email webhook, routed by the recipient's domain, in
   Mailgun's, Postmark's or Mailman's own shape. Every attempt is recorded with
@@ -178,8 +182,27 @@ arrives rather than on a poll.
 
 ## Configuration
 
-Everything has a working default. `~/.mailman/config.json` is only needed for
-webhook routing:
+Everything has a working default, and nothing has to be configured to capture
+mail. Pointing Mailman at an app is the one thing worth setting up, and the
+gear in the inbox is the shortest way there: set the webhook URL, pick a
+format, add a route per project, and press **Test** to see what your app
+returns before anything depends on it. Webhook changes take effect on the next
+reply — no restart.
+
+Saving writes the same `~/.mailman/config.json` documented below, so a project
+can keep one in version control and CI can read it. The file is replaced
+atomically and written `0600`, since it can hold a signing key; an existing
+world-readable one is tightened on the first save.
+
+Two fields the page shows but cannot apply on its own: the HTTP and SMTP
+addresses. They are saved, but a listener already bound cannot move, so the
+page shows the port actually in use and says a restart is needed.
+
+A field held by a `MAILMAN_*` variable or a command-line flag is shown locked,
+naming what holds it, and saving it is refused rather than written and then
+silently shadowed. Routes are file-only by design, so nothing can shadow them.
+
+### The config file
 
 ```json
 {
@@ -235,11 +258,9 @@ existing handler works unchanged. With no key configured, Mailgun's `signature`
 field is omitted rather than computed from an empty one: a verifying handler
 then fails for an obvious reason instead of a mysterious one.
 
-Two limits worth knowing. A blank `signing_key` on a route inherits the
+One limit worth knowing: a blank `signing_key` on a route inherits the
 top-level one, so there is no way to say "this one route is unsigned" while a
-key exists above it. And config is read at startup, so editing `config.json`
-takes a restart — the reply keeps in the database until then, and **Retry** is
-still there to click.
+key exists above it.
 
 ## JSON API
 
@@ -263,7 +284,9 @@ No authentication — it is a localhost tool. Useful for CI assertions.
 | POST | `/api/v1/messages/{id}/deliveries` | Send it again |
 | GET | `/api/v1/webhook/route?recipient=` | Where a reply to an address would go |
 | GET | `/api/v1/attachments/{id}` | Download a part |
-| GET | `/api/v1/config` | Effective settings, including webhook routes |
+| GET | `/api/v1/config` | Effective settings, where each came from, and the addresses actually bound |
+| PUT | `/api/v1/config` | Save settings; webhook changes apply immediately |
+| POST | `/api/v1/webhook/test` | Post a synthetic message and report what the app returned |
 | GET | `/api/v1/events` | WebSocket event stream |
 | GET | `/healthz` | Liveness |
 
@@ -308,4 +331,4 @@ all work.
 
 Still to come: attachments on replies, which the message builder already
 handles but the composer has no file picker for; automatic retry with backoff;
-and picking up a changed `config.json` without a restart.
+and rebinding the SMTP port without a restart.

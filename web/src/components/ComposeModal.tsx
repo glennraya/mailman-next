@@ -24,6 +24,7 @@ interface Props {
   /** Seeds a reply, and threads it: the server answers this message. */
   replyTo?: Message
   onSent: (result: ReplyResult) => void
+  onOpenSettings: () => void
 }
 
 /**
@@ -33,7 +34,7 @@ interface Props {
  * unmounts on close. App keeps this component mounted, so closing the modal
  * costs nothing.
  */
-export function ComposeModal({ open, onClose, replyTo, onSent }: Props) {
+export function ComposeModal({ open, onClose, replyTo, onSent, onOpenSettings }: Props) {
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
   const [cc, setCc] = useState('')
@@ -150,7 +151,7 @@ export function ComposeModal({ open, onClose, replyTo, onSent }: Props) {
           <Field label="From" value={from} onChange={setFrom} placeholder="you@app.test" />
           <Field label="To" value={to} onChange={setTo} placeholder="someone@example.test" />
 
-          <RoutePreview route={route} recipient={recipient} />
+          <RoutePreview route={route} recipient={recipient} onOpenSettings={onOpenSettings} />
 
           {showCopies ? (
             <>
@@ -212,14 +213,27 @@ export function ComposeModal({ open, onClose, replyTo, onSent }: Props) {
  * so here, rather than after the fact, is the difference between a tool that
  * is honest and one that looks broken.
  */
-function RoutePreview({ route, recipient }: { route: RouteLookup | null; recipient: string }) {
+function RoutePreview({
+  route,
+  recipient,
+  onOpenSettings,
+}: {
+  route: RouteLookup | null
+  recipient: string
+  onOpenSettings: () => void
+}) {
   if (!recipient || !route) return null
 
   if (!route.routed || !route.route) {
     return (
       <p className="pl-19 text-xs text-foreground">
         {route.reason ?? 'No webhook route matches this address'} — the reply will be stored but not
-        forwarded.
+        forwarded.{' '}
+        {/* The moment someone most wants the settings page is the moment they
+            are told their reply is going nowhere. */}
+        <Button variant="link" size="xs" className="h-auto px-0" onClick={onOpenSettings}>
+          Set one up
+        </Button>
       </p>
     )
   }

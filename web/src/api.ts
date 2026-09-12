@@ -7,6 +7,9 @@ import type {
   ReplyResult,
   RouteLookup,
   ServerConfig,
+  SettingsPatch,
+  WebhookTest,
+  WebhookTestResult,
 } from '@/types'
 
 // In development the Vite proxy forwards these to the Go server; in the
@@ -47,6 +50,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   config: () => request<ServerConfig>('/config'),
+
+  // Saves only what it is given; anything absent is left as it was. A field
+  // an environment variable holds comes back 409 rather than being written
+  // and then silently shadowed.
+  saveConfig: (patch: SettingsPatch) =>
+    request<ServerConfig>('/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+
+  // Posts a synthetic message and reports what the app returned, without
+  // recording a delivery. Takes the values on screen, so a URL can be proved
+  // before anyone commits to it.
+  testWebhook: (target: WebhookTest) =>
+    request<WebhookTestResult>('/webhook/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(target),
+    }),
 
   conversations: (query = '', cursor?: number) => {
     const params = new URLSearchParams()

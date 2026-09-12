@@ -1,12 +1,19 @@
 import { Inbox } from 'lucide-react'
 
+import { Button } from '@/components/ui/button'
 import type { ServerConfig } from '@/types'
 
 /**
  * What a developer sees on first run. The whole job of this screen is to make
  * the next step obvious: point a project at the capture port.
  */
-export function EmptyState({ config }: { config: ServerConfig | null }) {
+export function EmptyState({
+  config,
+  onOpenSettings,
+}: {
+  config: ServerConfig | null
+  onOpenSettings: () => void
+}) {
   const [host, port] = (config?.smtp_addr ?? '127.0.0.1:1983').split(':')
 
   return (
@@ -27,10 +34,14 @@ MAIL_ENCRYPTION=null`}
         </pre>
 
         {config && !config.webhook.enabled && (
-          <p className="mt-4 text-xs text-muted-foreground">
-            No webhook is configured yet, so replies will not reach your app. Add one in{' '}
-            <code className="rounded bg-muted px-1 py-0.5">{config.home}/config.json</code>.
-          </p>
+          <div className="mt-5 space-y-2">
+            <p className="text-xs text-muted-foreground">
+              No webhook is configured yet, so replies will not reach your app.
+            </p>
+            <Button variant="outline" size="sm" onClick={onOpenSettings}>
+              Set up a webhook
+            </Button>
+          </div>
         )}
       </div>
     </div>

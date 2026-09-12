@@ -43,8 +43,12 @@ dev-ui:
 	cd web && npm run dev
 
 ## test: the Go suite plus the frontend's type check
+#
+# -race matches what CI runs. Without it the settings reload, which swaps a
+# configuration snapshot other request goroutines are reading, could pass
+# locally and fail there.
 test:
-	go test ./...
+	go test -race ./...
 	cd web && npm run types:check
 
 lint:

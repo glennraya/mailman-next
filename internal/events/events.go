@@ -16,6 +16,7 @@ const (
 	ConversationDeleted = "conversation.deleted"
 	ConversationRead    = "conversation.read"
 	DeliveryCompleted   = "delivery.completed"
+	ConfigChanged       = "config.changed"
 	MailboxCleared      = "mailbox.cleared"
 )
 

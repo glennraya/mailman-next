@@ -58,16 +58,6 @@ func bootWith(t *testing.T, configure func(*config.Config)) *instance {
 	t.Helper()
 
 	home := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	store, err := mailstore.Open(filepath.Join(home, "mailman.db"), filepath.Join(home, "mail"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-
-	broker := events.New()
-	ingestor := mailmime.NewIngestor(store, broker, logger)
 
 	cfg := &config.Config{
 		Home:            home,
@@ -79,6 +69,61 @@ func bootWith(t *testing.T, configure func(*config.Config)) *instance {
 	}
 	configure(cfg)
 
+	// No reload: this configuration was built in code and the config file
+	// knows nothing about it, so saving would have nothing coherent to write
+	// back into. A test that means to exercise saving uses bootSaved.
+	return start(t, home, cfg, nil)
+}
+
+// bootSaved runs Mailman the way the binary does, resolving its configuration
+// from a real config file in a scratch home. That is what lets a test save a
+// setting through the API and watch the reload pick it up -- bootWith cannot,
+// because its configuration exists only in memory.
+func bootSaved(t *testing.T, document *config.Document) *instance {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("MAILMAN_HOME", home)
+
+	// Clear anything the developer running the tests happens to have set, or
+	// their environment would shadow what these tests save.
+	for _, name := range []string{
+		"MAILMAN_HTTP_ADDR", "MAILMAN_SMTP_ADDR", "MAILMAN_MAX_MESSAGE_BYTES",
+		"MAILMAN_WEBHOOK_URL", "MAILMAN_WEBHOOK_FORMAT", "MAILMAN_WEBHOOK_SIGNING_KEY",
+		"MAILMAN_WEBHOOK_TIMEOUT", "MAILMAN_WEBHOOK_VERIFY_TLS",
+	} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+
+	if document != nil {
+		if err := config.WriteDocument(config.DocumentPath(home), document); err != nil {
+			t.Fatalf("seed config: %v", err)
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	return start(t, home, cfg, config.Load)
+}
+
+// start stands up the whole stack on ports the operating system chooses.
+func start(t *testing.T, home string, cfg *config.Config, reload func() (*config.Config, error)) *instance {
+	t.Helper()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	store, err := mailstore.Open(filepath.Join(home, "mailman.db"), filepath.Join(home, "mail"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	broker := events.New()
+	ingestor := mailmime.NewIngestor(store, broker, logger)
 	sender := webhook.New(webhook.Options{Store: store, Broker: broker, Logger: logger})
 
 	capture := smtpd.New(smtpd.Options{
@@ -93,20 +138,28 @@ func bootWith(t *testing.T, configure func(*config.Config)) *instance {
 		t.Fatalf("listen for SMTP: %v", err)
 	}
 
-	api := httpapi.New(httpapi.Options{
-		Store:    store,
-		Broker:   broker,
-		Config:   cfg,
-		Ingestor: ingestor,
-		Webhook:  sender,
-		Version:  "test",
-		Logger:   logger,
-	})
-
 	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for HTTP: %v", err)
 	}
+
+	// Built after both binds, so it can report the addresses actually in use
+	// rather than the ones configured -- which here are always port 0.
+	api := httpapi.New(httpapi.Options{
+		Store:    store,
+		Broker:   broker,
+		Config:   cfg,
+		Reload:   reload,
+		Ingestor: ingestor,
+		Webhook:  sender,
+		Version:  "test",
+		Logger:   logger,
+		Listening: httpapi.Listening{
+			HTTP:   httpListener.Addr().String(),
+			SMTP:   capture.Addr(),
+			Booted: cfg,
+		},
+	})
 
 	server := &http.Server{Handler: api.Handler()}
 
@@ -201,32 +254,43 @@ func (i *instance) send(t *testing.T, from string, to []string, body string) {
 // a browser would attach has to be attached here too.
 func (i *instance) post(t *testing.T, path string, body any, into any) int {
 	t.Helper()
+	return i.write(t, http.MethodPost, path, body, into)
+}
+
+func (i *instance) write(t *testing.T, method, path string, body any, into any) int {
+	t.Helper()
 
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("encode %s body: %v", path, err)
 	}
 
-	request, err := http.NewRequest(http.MethodPost, i.url(path), bytes.NewReader(encoded))
+	request, err := http.NewRequest(method, i.url(path), bytes.NewReader(encoded))
 	if err != nil {
-		t.Fatalf("build POST %s: %v", path, err)
+		t.Fatalf("build %s %s: %v", method, path, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Sec-Fetch-Site", "same-origin")
 
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer response.Body.Close()
 
 	raw, _ := io.ReadAll(response.Body)
 	if into != nil {
 		if err := json.Unmarshal(raw, into); err != nil {
-			t.Fatalf("decode POST %s (%d): %v: %s", path, response.StatusCode, err, raw)
+			t.Fatalf("decode %s %s (%d): %v: %s", method, path, response.StatusCode, err, raw)
 		}
 	}
 	return response.StatusCode
+}
+
+// put sends a JSON write with PUT, for the settings endpoint.
+func (i *instance) put(t *testing.T, path string, body any, into any) int {
+	t.Helper()
+	return i.write(t, http.MethodPut, path, body, into)
 }
 
 type conversationList struct {

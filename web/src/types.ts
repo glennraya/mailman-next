@@ -126,7 +126,10 @@ export interface WebhookRoute {
   url: string
   format: string
   has_secret: boolean
+  verify_tls?: boolean
 }
+
+export type WebhookFormat = 'generic' | 'mailgun' | 'postmark'
 
 export interface ServerConfig {
   version: string
@@ -134,14 +137,85 @@ export interface ServerConfig {
   http_addr: string
   home: string
   max_message_bytes: number
+
+  /**
+   * What outranks the config file, keyed by document path
+   * ("webhook.url" -> "MAILMAN_WEBHOOK_URL"). A field listed here cannot be
+   * saved, so the settings page renders it read-only and names what holds it.
+   */
+  overrides: Record<string, string>
+
+  /** False when this server cannot reload, which makes settings read-only. */
+  editable: boolean
+
+  /** Where the process actually bound, which a saved port change does not move. */
+  listening: {
+    http: string
+    smtp: string
+    needs_restart: boolean
+  }
+
   webhook: {
     enabled: boolean
     url: string
     format: string
+    has_secret: boolean
     verify_tls: boolean
+    timeout_seconds: number
     timeout_ms: number
     routes: Record<string, WebhookRoute>
   }
+}
+
+/**
+ * A settings save. Every field is optional and only what is present changes,
+ * which is what lets the page omit a field it renders locked.
+ *
+ * `signing_key` is write-only and has three meanings: absent leaves the
+ * stored key, `''` clears it, and a value replaces it. The key is never sent
+ * back, so a page that round-tripped the response would otherwise blank it.
+ *
+ * `routes` replaces the whole table when present, because that is the only
+ * way a removed row can be expressed -- the loader merges routes per key, so
+ * omitting one would never delete it.
+ */
+export interface SettingsPatch {
+  http_addr?: string
+  smtp_addr?: string
+  max_message_bytes?: number
+  webhook?: {
+    url?: string
+    format?: string
+    signing_key?: string
+    timeout_seconds?: number
+    verify_tls?: boolean
+    routes?: Record<string, RoutePatch>
+  }
+}
+
+export interface RoutePatch {
+  url: string
+  format?: string
+  signing_key?: string
+  timeout_seconds?: number
+  verify_tls?: boolean
+}
+
+export interface WebhookTest {
+  url: string
+  format?: string
+  signing_key?: string
+  verify_tls?: boolean
+  timeout_seconds?: number
+  recipient?: string
+}
+
+export interface WebhookTestResult {
+  url: string
+  format: string
+  status_code: number
+  error: string
+  ok: boolean
 }
 
 export type MailboxEventType =
@@ -151,6 +225,7 @@ export type MailboxEventType =
   | 'conversation.deleted'
   | 'conversation.read'
   | 'delivery.completed'
+  | 'config.changed'
   | 'mailbox.cleared'
 
 export interface MailboxEvent {

@@ -62,23 +62,36 @@ func serve(args []string) error {
 		}
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return err
+	// load resolves the configuration the same way every time: defaults, the
+	// config file, the environment, and finally the flags this process was
+	// given. The settings page saves to the file and reloads through here, so
+	// a value saved in the browser cannot quietly outrank a flag on the
+	// command line -- and there is one code path rather than two that drift.
+	load := func() (*config.Config, error) {
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, err
+		}
+
+		fs.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "http":
+				cfg.HTTPAddr = *httpAddr
+				cfg.Override(config.FieldHTTPAddr, "-http")
+			case "smtp":
+				cfg.SMTPAddr = *smtpAddr
+				cfg.Override(config.FieldSMTPAddr, "-smtp")
+			case "max-size":
+				cfg.MaxMessageBytes = *maxSize
+				cfg.Override(config.FieldMaxMessageBytes, "-max-size")
+			}
+		})
+
+		return cfg, cfg.Validate()
 	}
 
-	fs.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "http":
-			cfg.HTTPAddr = *httpAddr
-		case "smtp":
-			cfg.SMTPAddr = *smtpAddr
-		case "max-size":
-			cfg.MaxMessageBytes = *maxSize
-		}
-	})
-
-	if err := cfg.Validate(); err != nil {
+	cfg, err := load()
+	if err != nil {
 		return err
 	}
 
@@ -103,17 +116,6 @@ func serve(args []string) error {
 		MaxMessageBytes: cfg.MaxMessageBytes,
 		Ingestor:        ingestor,
 		Logger:          logger,
-	})
-
-	api := httpapi.New(httpapi.Options{
-		Store:    store,
-		Broker:   broker,
-		Config:   cfg,
-		Ingestor: ingestor,
-		Webhook:  sender,
-		Assets:   web.Handler(),
-		Version:  version,
-		Logger:   logger,
 	})
 
 	// Binding is not enough to tell whether a port is free -- see
@@ -141,6 +143,27 @@ func serve(args []string) error {
 		captureListener.Close()
 		return fmt.Errorf("listen for HTTP on %s: %w", cfg.HTTPAddr, err)
 	}
+
+	// Built after both binds, because it reports the addresses actually in
+	// use rather than the ones configured. The two differ whenever a port is
+	// 0, and the settings page has to show a port change as pending until a
+	// restart rather than as already in effect.
+	api := httpapi.New(httpapi.Options{
+		Store:    store,
+		Broker:   broker,
+		Config:   cfg,
+		Reload:   load,
+		Ingestor: ingestor,
+		Webhook:  sender,
+		Assets:   web.Handler(),
+		Version:  version,
+		Logger:   logger,
+		Listening: httpapi.Listening{
+			HTTP:   httpListener.Addr().String(),
+			SMTP:   capture.Addr(),
+			Booted: cfg,
+		},
+	})
 
 	server := &http.Server{
 		Handler: api.Handler(),

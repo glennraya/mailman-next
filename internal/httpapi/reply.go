@@ -219,7 +219,7 @@ func (s *Server) deliver(r *http.Request, message *mailstore.Message, raw []byte
 		return result
 	}
 
-	route, ok := s.config.RouteFor(recipient)
+	route, ok := s.settings().RouteFor(recipient)
 	if !ok {
 		// The README is explicit that this must not look like success.
 		result.Reason = fmt.Sprintf(
@@ -268,7 +268,7 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	// Saying where this message would go now -- not where it went -- is what
 	// makes the retry button explicable after a config change.
 	if len(message.Envelope.Recipients) > 0 {
-		if route, ok := s.config.RouteFor(message.Envelope.Recipients[0]); ok {
+		if route, ok := s.settings().RouteFor(message.Envelope.Recipients[0]); ok {
 			body["route"] = describe(route)
 		}
 	}
@@ -318,7 +318,7 @@ func (s *Server) resolveRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	route, ok := s.config.RouteFor(recipient)
+	route, ok := s.settings().RouteFor(recipient)
 	if !ok {
 		s.respond(w, r, http.StatusOK, map[string]any{
 			"routed": false,

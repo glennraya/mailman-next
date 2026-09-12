@@ -122,6 +122,28 @@ func (s *Sender) Send(ctx context.Context, m *mailstore.Message, raw []byte, rou
 	return delivery, nil
 }
 
+// Probe posts a message and reports the outcome without recording anything.
+//
+// The settings page uses it to prove a URL before a real reply depends on it.
+// It writes no delivery row deliberately: there is no stored message for an
+// attempt to belong to, and a page that checks a URL should not leave entries
+// in the log a real reply writes to.
+func (s *Sender) Probe(ctx context.Context, m *mailstore.Message, raw []byte, route config.Resolved) (int, string, error) {
+	payload, err := Build(m, raw, route)
+	if err != nil {
+		return 0, "", err
+	}
+
+	started := time.Now()
+	status, failure := s.post(ctx, payload, route)
+
+	s.logger.Debug("tested a webhook target",
+		"url", route.URL, "format", route.Format,
+		"status", status, "duration", time.Since(started), "error", failure)
+
+	return status, failure, nil
+}
+
 // announce tells every open tab how the delivery went.
 //
 // ConversationID is not decoration here: the client refreshes the open thread
