@@ -1,5 +1,7 @@
 import { useEffect, useId, useState } from 'react'
+import { Loader2, Send } from 'lucide-react'
 
+import { api } from '@/api'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -14,26 +16,24 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { formatAddress } from '@/format'
-import type { Message } from '@/types'
+import type { Message, ReplyResult, RouteLookup } from '@/types'
 
 interface Props {
   open: boolean
   onClose: () => void
-  /** Seeds a reply. Delivery is the next change; the shape is here already. */
+  /** Seeds a reply, and threads it: the server answers this message. */
   replyTo?: Message
+  onSent: (result: ReplyResult) => void
 }
 
 /**
- * Writing half of the inbox. The fields and their validation match what
- * POST /api/v1/messages already accepts, so wiring delivery to this form is
- * an addition rather than a rewrite -- but the button stays disabled until
- * that endpoint sends rather than re-captures.
+ * Writing half of the inbox.
  *
  * The draft lives here rather than in the dialog's content, which Radix
  * unmounts on close. App keeps this component mounted, so closing the modal
  * costs nothing.
  */
-export function ComposeModal({ open, onClose, replyTo }: Props) {
+export function ComposeModal({ open, onClose, replyTo, onSent }: Props) {
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
   const [cc, setCc] = useState('')
@@ -41,10 +41,18 @@ export function ComposeModal({ open, onClose, replyTo }: Props) {
   const [subject, setSubject] = useState('')
   const [body, setBody] = useState('')
   const [showCopies, setShowCopies] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [route, setRoute] = useState<RouteLookup | null>(null)
   const bodyId = useId()
 
   // Opening a reply seeds the form. A blank compose is left alone, so a draft
   // survives closing and reopening the modal.
+  //
+  // This mirrors what outbound.NewReply does on the server, which recomputes
+  // the same fields for any the request leaves empty. It is a preview, not the
+  // authority -- the client's reply-prefix test is narrower than the server's,
+  // which also knows Fwd:, Re[2]: and the localized spellings.
   useEffect(() => {
     if (!open || !replyTo) return
 
@@ -55,8 +63,64 @@ export function ComposeModal({ open, onClose, replyTo }: Props) {
     setSubject(replyTo.subject.match(/^re:/i) ? replyTo.subject : `Re: ${replyTo.subject}`)
   }, [open, replyTo])
 
-  // The same three rules the server enforces in buildInjected.
+  // Where this will be delivered, asked as the recipient is typed. Debounced
+  // the way the inbox search is, so a request is not sent per keystroke.
+  const recipient = recipients(to)[0] ?? ''
+  useEffect(() => {
+    if (!open || !recipient) {
+      setRoute(null)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      api
+        .route(recipient)
+        .then(setRoute)
+        .catch(() => setRoute(null))
+    }, 250)
+
+    return () => window.clearTimeout(timer)
+  }, [open, recipient])
+
+  // The same three rules the server enforces before it builds the message.
   const ready = from.trim() !== '' && recipients(to).length > 0 && body.trim() !== ''
+
+  const send = async () => {
+    setSending(true)
+    setError(null)
+
+    try {
+      const result = await api.reply({
+        parent_id: replyTo?.id,
+        from: from.trim(),
+        to: recipients(to),
+        cc: recipients(cc),
+        bcc: recipients(bcc),
+        subject,
+        text: body,
+      })
+
+      // Sent. Clear the draft before closing, so the next compose starts
+      // empty rather than holding a message that has already gone.
+      setFrom('')
+      setTo('')
+      setCc('')
+      setBcc('')
+      setSubject('')
+      setBody('')
+      setShowCopies(false)
+      setRoute(null)
+
+      onSent(result)
+      onClose()
+    } catch (err) {
+      // The draft is kept: whatever went wrong, retyping the message is not
+      // part of the fix.
+      setError(err instanceof Error ? err.message : 'Could not send')
+    } finally {
+      setSending(false)
+    }
+  }
 
   return (
     <Dialog
@@ -69,13 +133,24 @@ export function ComposeModal({ open, onClose, replyTo }: Props) {
         <DialogHeader>
           <DialogTitle>{replyTo ? 'Reply' : 'New message'}</DialogTitle>
           <DialogDescription className="sr-only">
-            Compose a message against the capture mailbox.
+            Compose a message and deliver it to the app under test.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="mt-4 space-y-3">
+        <div
+          className="mt-4 space-y-3"
+          onKeyDown={(event) => {
+            // The one shortcut a mail composer is expected to have.
+            if (!(event.metaKey || event.ctrlKey) || event.key !== 'Enter') return
+            if (!ready || sending) return
+            event.preventDefault()
+            void send()
+          }}
+        >
           <Field label="From" value={from} onChange={setFrom} placeholder="you@app.test" />
           <Field label="To" value={to} onChange={setTo} placeholder="someone@example.test" />
+
+          <RoutePreview route={route} recipient={recipient} />
 
           {showCopies ? (
             <>
@@ -110,22 +185,51 @@ export function ComposeModal({ open, onClose, replyTo }: Props) {
         </div>
 
         <DialogFooter className="mt-4 sm:items-center sm:justify-between">
-          <p className="text-xs text-muted-foreground">
-            {ready
-              ? 'Ready to send once delivery lands.'
-              : 'A sender, a recipient and a message are required.'}
+          <p className={`text-xs ${error ? 'text-destructive' : 'text-muted-foreground'}`}>
+            {error ?? (ready ? '' : 'A sender, a recipient and a message are required.')}
           </p>
           <div className="flex items-center gap-2">
             <DialogClose asChild>
-              <Button variant="ghost">Cancel</Button>
+              <Button variant="ghost" disabled={sending}>
+                Cancel
+              </Button>
             </DialogClose>
-            <Button disabled title="Sending arrives with the reply and webhook delivery work">
-              Send
+            <Button disabled={!ready || sending} onClick={() => void send()}>
+              {sending ? <Loader2 className="animate-spin" aria-hidden /> : <Send aria-hidden />}
+              {sending ? 'Sending' : 'Send'}
             </Button>
           </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * Where this reply will land, before it is sent.
+ *
+ * A reply to an address no route covers is stored and never forwarded. Saying
+ * so here, rather than after the fact, is the difference between a tool that
+ * is honest and one that looks broken.
+ */
+function RoutePreview({ route, recipient }: { route: RouteLookup | null; recipient: string }) {
+  if (!recipient || !route) return null
+
+  if (!route.routed || !route.route) {
+    return (
+      <p className="pl-19 text-xs text-foreground">
+        {route.reason ?? 'No webhook route matches this address'} — the reply will be stored but not
+        forwarded.
+      </p>
+    )
+  }
+
+  return (
+    <p className="pl-19 text-xs text-muted-foreground">
+      Delivered as <span className="font-medium">{route.route.format}</span> to{' '}
+      <span className="font-mono">{route.route.url}</span>
+      {route.route.fallback && ' (the default route)'}
+    </p>
   )
 }
 

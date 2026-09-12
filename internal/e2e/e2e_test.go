@@ -5,18 +5,24 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/smtp"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +35,7 @@ import (
 	"github.com/glennraya/mailman/internal/mailmime"
 	"github.com/glennraya/mailman/internal/mailstore"
 	"github.com/glennraya/mailman/internal/smtpd"
+	"github.com/glennraya/mailman/internal/webhook"
 )
 
 // instance is a running Mailman, on ports the operating system chose.
@@ -38,7 +45,16 @@ type instance struct {
 	store    *mailstore.Store
 }
 
+// boot runs Mailman with no webhook configured, which is how it runs out of
+// the box.
 func boot(t *testing.T) *instance {
+	return bootWith(t, func(*config.Config) {})
+}
+
+// bootWith runs Mailman with the configuration a test needs, so the reply
+// tests can point it at a fake app without changing what the capture tests
+// mean.
+func bootWith(t *testing.T, configure func(*config.Config)) *instance {
 	t.Helper()
 
 	home := t.TempDir()
@@ -56,8 +72,14 @@ func boot(t *testing.T) *instance {
 	cfg := &config.Config{
 		Home:            home,
 		MaxMessageBytes: config.DefaultMaxSize,
-		Webhook:         config.Webhook{Format: config.DefaultFormat},
+		Webhook: config.Webhook{
+			Format: config.DefaultFormat,
+			Routes: map[string]config.Route{},
+		},
 	}
+	configure(cfg)
+
+	sender := webhook.New(webhook.Options{Store: store, Broker: broker, Logger: logger})
 
 	capture := smtpd.New(smtpd.Options{
 		Addr:            "127.0.0.1:0",
@@ -76,6 +98,7 @@ func boot(t *testing.T) *instance {
 		Broker:   broker,
 		Config:   cfg,
 		Ingestor: ingestor,
+		Webhook:  sender,
 		Version:  "test",
 		Logger:   logger,
 	})
@@ -172,6 +195,38 @@ func (i *instance) send(t *testing.T, from string, to []string, body string) {
 	if err := client.Quit(); err != nil {
 		t.Fatalf("quit: %v", err)
 	}
+}
+
+// post sends a JSON write. Writes are cross-origin protected, so the header
+// a browser would attach has to be attached here too.
+func (i *instance) post(t *testing.T, path string, body any, into any) int {
+	t.Helper()
+
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode %s body: %v", path, err)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, i.url(path), bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatalf("build POST %s: %v", path, err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer response.Body.Close()
+
+	raw, _ := io.ReadAll(response.Body)
+	if into != nil {
+		if err := json.Unmarshal(raw, into); err != nil {
+			t.Fatalf("decode POST %s (%d): %v: %s", path, response.StatusCode, err, raw)
+		}
+	}
+	return response.StatusCode
 }
 
 type conversationList struct {
@@ -477,5 +532,585 @@ func TestCrossOriginWriteIsRefused(t *testing.T) {
 	m.get(t, "/api/v1/conversations", &list)
 	if len(list.Conversations) != 1 {
 		t.Errorf("mailbox holds %d conversations, want the message left alone", len(list.Conversations))
+	}
+}
+
+// fakeApp is the application under test: it records what arrives at its
+// inbound route and answers with whatever the test asked for.
+type fakeApp struct {
+	server   *httptest.Server
+	received chan *receivedWebhook
+
+	mu      sync.Mutex
+	replies []int
+}
+
+type receivedWebhook struct {
+	ContentType string
+	Header      http.Header
+	Form        url.Values
+	Body        []byte
+}
+
+// newFakeApp answers with each status in turn, repeating the last one. Giving
+// it 500 then 200 is how the retry path is exercised.
+func newFakeApp(t *testing.T, statuses ...int) *fakeApp {
+	t.Helper()
+
+	if len(statuses) == 0 {
+		statuses = []int{http.StatusOK}
+	}
+
+	app := &fakeApp{received: make(chan *receivedWebhook, 8), replies: statuses}
+	app.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+
+		got := &receivedWebhook{
+			ContentType: r.Header.Get("Content-Type"),
+			Header:      r.Header.Clone(),
+			Body:        body,
+		}
+
+		// Re-parse the body rather than reading r.Form, so the test sees
+		// exactly the bytes that were sent.
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if err := r.ParseMultipartForm(1 << 20); err == nil {
+			got.Form = r.MultipartForm.Value
+		}
+
+		app.received <- got
+		w.WriteHeader(app.next())
+	}))
+	t.Cleanup(app.server.Close)
+
+	return app
+}
+
+func (a *fakeApp) next() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	status := a.replies[0]
+	if len(a.replies) > 1 {
+		a.replies = a.replies[1:]
+	}
+	return status
+}
+
+func (a *fakeApp) await(t *testing.T) *receivedWebhook {
+	t.Helper()
+
+	select {
+	case got := <-a.received:
+		return got
+	case <-time.After(5 * time.Second):
+		t.Fatal("the app under test received no webhook")
+		return nil
+	}
+}
+
+type replyResult struct {
+	Message struct {
+		ID             string `json:"id"`
+		ConversationID int64  `json:"conversation_id"`
+		Direction      string `json:"direction"`
+		MessageID      string `json:"message_id"`
+		InReplyTo      string `json:"in_reply_to"`
+		Subject        string `json:"subject"`
+	} `json:"message"`
+	Delivery *struct {
+		ID         int64  `json:"id"`
+		TargetURL  string `json:"target_url"`
+		Format     string `json:"format"`
+		Attempt    int    `json:"attempt"`
+		StatusCode int    `json:"status_code"`
+		Error      string `json:"error"`
+	} `json:"delivery"`
+	Route *struct {
+		Matched  string `json:"matched"`
+		URL      string `json:"url"`
+		Format   string `json:"format"`
+		Fallback bool   `json:"fallback"`
+	} `json:"route"`
+	Routed bool   `json:"routed"`
+	Reason string `json:"reason"`
+}
+
+type deliveryList struct {
+	Deliveries []struct {
+		ID         int64  `json:"id"`
+		Attempt    int    `json:"attempt"`
+		StatusCode int    `json:"status_code"`
+		Error      string `json:"error"`
+	} `json:"deliveries"`
+}
+
+// capture puts one mail in the inbox and returns the stored id of the message
+// a reply should answer, plus its conversation.
+func (i *instance) capture(t *testing.T) (messageID string, conversationID int64) {
+	t.Helper()
+
+	i.send(t, "billing@acme.test", []string{"glenn@myapp.test"},
+		mail("Order 4471 has shipped", "order-4471@acme.test", "",
+			"Reply-To: order-4471+t3h2@mail.acme.test"))
+
+	var list conversationList
+	i.get(t, "/api/v1/conversations", &list)
+	if len(list.Conversations) != 1 {
+		t.Fatalf("inbox holds %d conversations, want 1", len(list.Conversations))
+	}
+
+	var detail conversationDetail
+	i.get(t, fmt.Sprintf("/api/v1/conversations/%d", list.Conversations[0].ID), &detail)
+	if len(detail.Messages) != 1 {
+		t.Fatalf("thread holds %d messages, want 1", len(detail.Messages))
+	}
+
+	// Opening a thread marks it read, which is what the UI does before
+	// anyone can click Reply. Without it the unread count would still carry
+	// the mail being answered.
+	i.post(t, fmt.Sprintf("/api/v1/conversations/%d/seen", list.Conversations[0].ID), nil, nil)
+
+	return detail.Messages[0].ID, list.Conversations[0].ID
+}
+
+// TestReplyReachesTheAppAsAnInboundWebhook is the whole reason Mailman
+// exists: an application that expects an answer to the mail it sent gets one,
+// locally, in the shape its production handler already reads.
+func TestReplyReachesTheAppAsAnInboundWebhook(t *testing.T) {
+	app := newFakeApp(t)
+
+	m := bootWith(t, func(cfg *config.Config) {
+		cfg.Webhook.Routes["mail.acme.test"] = config.Route{
+			URL:        app.server.URL + "/webhooks/mailgun/inbound",
+			Format:     config.FormatMailgun,
+			SigningKey: "key-abc123",
+		}
+	})
+
+	parentID, conversationID := m.capture(t)
+
+	var result replyResult
+	status := m.post(t, "/api/v1/replies", map[string]any{
+		"parent_id": parentID,
+		"text":      "Please cancel this order.",
+	}, &result)
+
+	if status != http.StatusCreated {
+		t.Fatalf("POST /replies returned %d, want 201: %+v", status, result)
+	}
+	if !result.Routed {
+		t.Fatalf("reply was not routed: %s", result.Reason)
+	}
+	if result.Route == nil || result.Route.Matched != "mail.acme.test" {
+		t.Errorf("route = %+v, want the exact key to have matched", result.Route)
+	}
+	if result.Delivery == nil || result.Delivery.StatusCode != http.StatusOK {
+		t.Fatalf("delivery = %+v, want a 200", result.Delivery)
+	}
+	if result.Delivery.Attempt != 1 {
+		t.Errorf("attempt = %d, want 1", result.Delivery.Attempt)
+	}
+
+	// What the app actually received is the only assertion that proves the
+	// feature. Everything above only proves Mailman believes it worked.
+	got := app.await(t)
+
+	if !strings.HasPrefix(got.ContentType, "multipart/form-data") {
+		t.Errorf("content type = %q, want Mailgun's multipart form", got.ContentType)
+	}
+	// Reply-To decided the recipient, which is how an app ties an answer back
+	// to a record.
+	if recipient := got.Form.Get("recipient"); recipient != "order-4471+t3h2@mail.acme.test" {
+		t.Errorf("recipient = %q, want the Reply-To address", recipient)
+	}
+	if sender := got.Form.Get("sender"); sender != "glenn@myapp.test" {
+		t.Errorf("sender = %q, want the address the mail was addressed to", sender)
+	}
+	if body := got.Form.Get("body-plain"); !strings.Contains(body, "Please cancel this order.") {
+		t.Errorf("body-plain = %q", body)
+	}
+
+	// A text reply still carries an HTML alternative, because that is what a
+	// real reply carries and because plenty of inbound handlers read only the
+	// HTML part -- Movepro's does. Without these two fields the reply is
+	// stored with an empty body and looks like it arrived blank.
+	for _, field := range []string{"body-html", "stripped-html"} {
+		if value := got.Form.Get(field); !strings.Contains(value, "Please cancel this order.") {
+			t.Errorf("%s = %q, want the reply rendered as HTML", field, value)
+		}
+	}
+	if subject := got.Form.Get("subject"); subject != "Re: Order 4471 has shipped" {
+		t.Errorf("subject = %q", subject)
+	}
+
+	// A production Mailgun handler verifies before it does anything else, so
+	// if this does not match, nothing downstream of it runs.
+	mac := hmac.New(sha256.New, []byte("key-abc123"))
+	mac.Write([]byte(got.Form.Get("timestamp") + got.Form.Get("token")))
+	if want := hex.EncodeToString(mac.Sum(nil)); got.Form.Get("signature") != want {
+		t.Errorf("signature = %q, want %q", got.Form.Get("signature"), want)
+	}
+
+	var headers [][2]string
+	if err := json.Unmarshal([]byte(got.Form.Get("message-headers")), &headers); err != nil {
+		t.Fatalf("decode message-headers: %v", err)
+	}
+	var inReplyTo string
+	for _, header := range headers {
+		if strings.EqualFold(header[0], "In-Reply-To") {
+			inReplyTo = header[1]
+		}
+	}
+	if inReplyTo != "<order-4471@acme.test>" {
+		t.Errorf("In-Reply-To in message-headers = %q, want the original's Message-ID", inReplyTo)
+	}
+
+	// And as its own field, which is how a real handler reads it. Movepro's
+	// production controller gates on isset($data['In-Reply-To']) and drops
+	// the reply without it, so this is the assertion that proves the payload
+	// is usable rather than merely complete.
+	if field := got.Form.Get("In-Reply-To"); field != "<order-4471@acme.test>" {
+		t.Errorf("In-Reply-To field = %q, want the original's Message-ID", field)
+	}
+	if field := got.Form.Get("Message-Id"); field == "" {
+		t.Error("no Message-Id field")
+	}
+	if got.Form.Get("X-Mailgun-Incoming") != "Yes" {
+		t.Errorf("X-Mailgun-Incoming = %q", got.Form.Get("X-Mailgun-Incoming"))
+	}
+	if domain := got.Form.Get("domain"); domain != "mail.acme.test" {
+		t.Errorf("domain = %q", domain)
+	}
+
+	// The reply belongs in the thread it answers, and it is not news to the
+	// person who just wrote it.
+	var detail conversationDetail
+	m.get(t, fmt.Sprintf("/api/v1/conversations/%d", conversationID), &detail)
+
+	if len(detail.Messages) != 2 {
+		t.Fatalf("thread holds %d messages, want 2", len(detail.Messages))
+	}
+	if result.Message.ConversationID != conversationID {
+		t.Errorf("reply landed in conversation %d, want %d",
+			result.Message.ConversationID, conversationID)
+	}
+	if result.Message.Direction != "outbound" {
+		t.Errorf("direction = %q, want outbound", result.Message.Direction)
+	}
+
+	var list conversationList
+	m.get(t, "/api/v1/conversations", &list)
+	if list.Unread != 0 {
+		t.Errorf("unread = %d, want 0: a reply you wrote is not unread mail", list.Unread)
+	}
+
+	// And the attempt is readable back, which is what the UI shows.
+	var deliveries deliveryList
+	m.get(t, "/api/v1/messages/"+result.Message.ID+"/deliveries", &deliveries)
+	if len(deliveries.Deliveries) != 1 || deliveries.Deliveries[0].StatusCode != http.StatusOK {
+		t.Errorf("deliveries = %+v, want one successful attempt", deliveries.Deliveries)
+	}
+}
+
+// A reply with nowhere to go must still be stored, and Mailman must say so
+// rather than report a delivery that never happened.
+func TestAReplyWithNoRouteIsStoredButNotForwarded(t *testing.T) {
+	m := boot(t)
+
+	parentID, conversationID := m.capture(t)
+
+	var result replyResult
+	status := m.post(t, "/api/v1/replies", map[string]any{
+		"parent_id": parentID,
+		"text":      "Please cancel this order.",
+	}, &result)
+
+	if status != http.StatusCreated {
+		t.Fatalf("POST /replies returned %d, want 201", status)
+	}
+	if result.Routed {
+		t.Error("a reply was reported as routed with no webhook configured")
+	}
+	if result.Delivery != nil {
+		t.Errorf("delivery = %+v, want none", result.Delivery)
+	}
+	if !strings.Contains(result.Reason, "mail.acme.test") {
+		t.Errorf("reason = %q, want it to name the unmatched domain", result.Reason)
+	}
+
+	// Losing what someone typed because their config is wrong would be the
+	// one unrecoverable outcome.
+	var detail conversationDetail
+	m.get(t, fmt.Sprintf("/api/v1/conversations/%d", conversationID), &detail)
+	if len(detail.Messages) != 2 {
+		t.Fatalf("thread holds %d messages, want the reply kept", len(detail.Messages))
+	}
+
+	var deliveries deliveryList
+	m.get(t, "/api/v1/messages/"+result.Message.ID+"/deliveries", &deliveries)
+	if len(deliveries.Deliveries) != 0 {
+		t.Errorf("deliveries = %+v, want none", deliveries.Deliveries)
+	}
+}
+
+// The app under test throwing is not Mailman failing. The attempt is recorded
+// with the app's own error, and retrying once it recovers delivers.
+func TestRetryDeliversAgainAfterTheAppRecovers(t *testing.T) {
+	app := newFakeApp(t, http.StatusInternalServerError, http.StatusOK)
+
+	m := bootWith(t, func(cfg *config.Config) {
+		cfg.Webhook.URL = app.server.URL + "/inbound"
+		cfg.Webhook.Format = config.FormatPostmark
+	})
+
+	parentID, _ := m.capture(t)
+
+	var first replyResult
+	if status := m.post(t, "/api/v1/replies", map[string]any{
+		"parent_id": parentID,
+		"text":      "Please cancel this order.",
+	}, &first); status != http.StatusCreated {
+		t.Fatalf("POST /replies returned %d, want 201", status)
+	}
+
+	// A rejected delivery is still a successful request: the reply exists and
+	// the reason is recorded.
+	if !first.Routed || first.Delivery == nil {
+		t.Fatalf("reply was not attempted: %+v", first)
+	}
+	if first.Delivery.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", first.Delivery.StatusCode)
+	}
+	if first.Route == nil || !first.Route.Fallback {
+		t.Errorf("route = %+v, want the top-level fallback", first.Route)
+	}
+
+	got := app.await(t)
+	if got.ContentType != "application/json" {
+		t.Errorf("content type = %q, want Postmark's JSON", got.ContentType)
+	}
+
+	var postmark struct {
+		MessageStream     string `json:"MessageStream"`
+		OriginalRecipient string `json:"OriginalRecipient"`
+		MailboxHash       string `json:"MailboxHash"`
+		StrippedTextReply string `json:"StrippedTextReply"`
+	}
+	if err := json.Unmarshal(got.Body, &postmark); err != nil {
+		t.Fatalf("decode postmark payload: %v", err)
+	}
+	if postmark.MessageStream != "inbound" {
+		t.Errorf("MessageStream = %q", postmark.MessageStream)
+	}
+	if postmark.OriginalRecipient != "order-4471+t3h2@mail.acme.test" {
+		t.Errorf("OriginalRecipient = %q", postmark.OriginalRecipient)
+	}
+	// The plus-addressed record reference an app keys off.
+	if postmark.MailboxHash != "t3h2" {
+		t.Errorf("MailboxHash = %q, want %q", postmark.MailboxHash, "t3h2")
+	}
+	if postmark.StrippedTextReply != "Please cancel this order." {
+		t.Errorf("StrippedTextReply = %q", postmark.StrippedTextReply)
+	}
+
+	// Retry: same message, resolved afresh, appended as a second attempt.
+	var second replyResult
+	if status := m.post(t, "/api/v1/messages/"+first.Message.ID+"/deliveries", nil, &second); status != http.StatusOK {
+		t.Fatalf("retry returned %d, want 200", status)
+	}
+	if second.Delivery == nil || second.Delivery.StatusCode != http.StatusOK {
+		t.Fatalf("retry delivery = %+v, want a 200", second.Delivery)
+	}
+	if second.Delivery.Attempt != 2 {
+		t.Errorf("attempt = %d, want 2", second.Delivery.Attempt)
+	}
+	app.await(t)
+
+	var deliveries deliveryList
+	m.get(t, "/api/v1/messages/"+first.Message.ID+"/deliveries", &deliveries)
+	if len(deliveries.Deliveries) != 2 {
+		t.Fatalf("got %d attempts, want 2", len(deliveries.Deliveries))
+	}
+	// Newest first, so the successful retry leads.
+	if deliveries.Deliveries[0].Attempt != 2 || deliveries.Deliveries[1].Attempt != 1 {
+		t.Errorf("attempts = %+v, want newest first", deliveries.Deliveries)
+	}
+	if deliveries.Deliveries[1].Error == "" {
+		t.Error("the failed attempt recorded no reason")
+	}
+}
+
+// Composing from scratch routes and delivers exactly like a reply: an address
+// like order-4471@mail.acme.test has to work whether it was typed or seeded.
+func TestAComposedMessageIsDeliveredToo(t *testing.T) {
+	app := newFakeApp(t)
+
+	m := bootWith(t, func(cfg *config.Config) {
+		cfg.Webhook.Routes["*.acme.test"] = config.Route{URL: app.server.URL + "/inbound"}
+	})
+
+	var result replyResult
+	status := m.post(t, "/api/v1/replies", map[string]any{
+		"from":    "glenn@myapp.test",
+		"to":      []string{"order-4471@mail.acme.test"},
+		"subject": "Cancel my order",
+		"text":    "Please cancel it.",
+	}, &result)
+
+	if status != http.StatusCreated {
+		t.Fatalf("POST /replies returned %d, want 201: %+v", status, result)
+	}
+	if !result.Routed || result.Delivery == nil {
+		t.Fatalf("composed message was not routed: %s", result.Reason)
+	}
+	if result.Route == nil || result.Route.Matched != "*.acme.test" {
+		t.Errorf("route = %+v, want the wildcard to have matched", result.Route)
+	}
+	if result.Route.Format != config.FormatGeneric {
+		t.Errorf("format = %q, want the inherited default", result.Route.Format)
+	}
+
+	got := app.await(t)
+
+	var generic struct {
+		Recipient string `json:"recipient"`
+		Subject   string `json:"subject"`
+		Text      string `json:"text"`
+		Raw       string `json:"raw"`
+	}
+	if err := json.Unmarshal(got.Body, &generic); err != nil {
+		t.Fatalf("decode generic payload: %v", err)
+	}
+	if generic.Recipient != "order-4471@mail.acme.test" {
+		t.Errorf("recipient = %q", generic.Recipient)
+	}
+	if generic.Subject != "Cancel my order" {
+		t.Errorf("subject = %q", generic.Subject)
+	}
+	if !strings.Contains(generic.Raw, "Subject: Cancel my order") {
+		t.Error("raw is not the verbatim message")
+	}
+}
+
+// text_only reproduces the rarer reply that carries no HTML at all, which is
+// what a terminal mail client sends.
+func TestATextOnlyReplyCarriesNoHTML(t *testing.T) {
+	app := newFakeApp(t)
+
+	m := bootWith(t, func(cfg *config.Config) {
+		cfg.Webhook.Routes["mail.acme.test"] = config.Route{
+			URL:    app.server.URL + "/inbound",
+			Format: config.FormatMailgun,
+		}
+	})
+
+	parentID, _ := m.capture(t)
+
+	var result replyResult
+	m.post(t, "/api/v1/replies", map[string]any{
+		"parent_id": parentID,
+		"text":      "Cancel it.",
+		"text_only": true,
+	}, &result)
+
+	got := app.await(t)
+
+	if got.Form.Get("body-plain") != "Cancel it." {
+		t.Errorf("body-plain = %q", got.Form.Get("body-plain"))
+	}
+	if _, present := got.Form["body-html"]; present {
+		t.Errorf("body-html = %q, want it absent", got.Form.Get("body-html"))
+	}
+}
+
+// A real HTML email is a whole document, and its <style> survives being
+// nested inside the frame's own. Every template resets body padding, so a
+// gutter that lives on body disappears on exactly the messages worth reading.
+func TestTheHTMLFrameKeepsAGutterAgainstATemplateThatResetsBody(t *testing.T) {
+	m := boot(t)
+
+	// The shape a transactional template actually has.
+	body := "MIME-Version: 1.0\r\n" +
+		"From: Movers <hello@acme.test>\r\n" +
+		"To: Glenn <glenn@myapp.test>\r\n" +
+		"Subject: We have found a truck\r\n" +
+		"Content-Type: text/html; charset=utf-8\r\n\r\n" +
+		"<html><head><style>body{margin:0;padding:0;background:#f4f4f5}</style></head>" +
+		"<body><p>Hi Chloe, great news.</p></body></html>\r\n"
+
+	m.send(t, "hello@acme.test", []string{"glenn@myapp.test"}, body)
+
+	var list conversationList
+	m.get(t, "/api/v1/conversations", &list)
+	var detail conversationDetail
+	m.get(t, fmt.Sprintf("/api/v1/conversations/%d", list.Conversations[0].ID), &detail)
+
+	response, err := http.Get(m.url("/api/v1/messages/" + detail.Messages[0].ID + "/html"))
+	if err != nil {
+		t.Fatalf("fetch html: %v", err)
+	}
+	defer response.Body.Close()
+
+	rendered, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read html: %v", err)
+	}
+	frame := string(rendered)
+
+	// The gutter is inline on a wrapper, so the template's reset cannot
+	// reach it.
+	if !strings.Contains(frame, `<div style="padding:16px">`) {
+		t.Error("no padded wrapper around the body")
+	}
+	// And it has to sit outside the message, not inside it.
+	wrapper := strings.Index(frame, `<div style="padding:16px">`)
+	message := strings.Index(frame, "Hi Chloe")
+	if wrapper < 0 || message < 0 || wrapper > message {
+		t.Errorf("wrapper at %d, message at %d: the wrapper must enclose the message", wrapper, message)
+	}
+	// The template's own reset is still present -- it is the message, and
+	// the point is that it no longer decides the gutter.
+	if !strings.Contains(frame, "padding:0") {
+		t.Error("the template's own CSS was altered; the body must be served verbatim")
+	}
+}
+
+// Validation has to match what the compose form already displays.
+func TestReplyValidation(t *testing.T) {
+	m := boot(t)
+
+	cases := []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{"no sender", map[string]any{"to": []string{"a@b.test"}, "text": "hi"}, "from is required"},
+		{"no recipient", map[string]any{"from": "a@b.test", "text": "hi"}, "at least one recipient is required"},
+		{"no body", map[string]any{"from": "a@b.test", "to": []string{"c@d.test"}}, "either text or html is required"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var failure struct {
+				Error string `json:"error"`
+			}
+			if status := m.post(t, "/api/v1/replies", c.body, &failure); status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", status)
+			}
+			if failure.Error != c.want {
+				t.Errorf("error = %q, want %q", failure.Error, c.want)
+			}
+		})
+	}
+
+	var failure struct {
+		Error string `json:"error"`
+	}
+	if status := m.post(t, "/api/v1/replies", map[string]any{
+		"parent_id": "01jnosuchmessage",
+		"text":      "hi",
+	}, &failure); status != http.StatusNotFound {
+		t.Errorf("replying to a missing message returned %d, want 404", status)
 	}
 }

@@ -259,7 +259,10 @@ func (s *Store) ListDeliveries(ctx context.Context, messageID string) ([]Deliver
 	return out, rows.Err()
 }
 
-// GetDelivery returns one attempt, which a retry uses to find its target.
+// GetDelivery returns one recorded attempt. Retrying does not go through
+// here: it is keyed on the message and re-resolves the route from current
+// configuration, so a developer who fixes their config and retries reaches
+// the corrected URL rather than replaying the wrong one.
 func (s *Store) GetDelivery(ctx context.Context, id int64) (*Delivery, error) {
 	var (
 		d         Delivery

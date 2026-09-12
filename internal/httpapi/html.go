@@ -49,11 +49,24 @@ func (s *Server) getMessageHTML(w http.ResponseWriter, r *http.Request) {
 		imagePolicy,
 	}, "; "))
 
+	// The gutter is an inline style on a wrapper, not padding on body.
+	//
+	// A real HTML email is a complete document, and nesting one inside this
+	// one leaves its <style> in the cascade even though the browser drops its
+	// <html> and <body> tags. Almost every email template resets
+	// `body { margin: 0; padding: 0 }`, which lands after the rule here and
+	// wins -- so body padding reliably disappears on exactly the messages
+	// people most want to read. An inline style on an element the template
+	// does not know about cannot be overridden by a stylesheet rule.
+	//
+	// Body keeps the background, so a template with its own background colour
+	// still fills the frame edge to edge and only its content is inset --
+	// which is what a mail client does.
 	fmt.Fprintf(w, `<!doctype html>
 <html><head><meta charset="utf-8"><base target="_blank">
 <style>
  body { font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        margin: 0; padding: 16px; color: #18181b; background: #fff;
+        margin: 0; padding: 0; color: #18181b; background: #fff;
         word-break: break-word; }
  pre  { white-space: pre-wrap; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
  img  { max-width: 100%%; height: auto; }
@@ -62,7 +75,7 @@ func (s *Server) getMessageHTML(w http.ResponseWriter, r *http.Request) {
    body { color: #fafafa; background: #09090b; }
    blockquote { border-color: #27272a; color: #a1a1aa; }
  }
-</style></head><body>%s</body></html>`, body)
+</style></head><body><div style="padding:16px">%s</div></body></html>`, body)
 }
 
 // renderBody picks the HTML body, falling back to the plain text one wrapped

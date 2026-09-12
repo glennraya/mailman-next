@@ -14,7 +14,14 @@ import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useMailboxEvents } from '@/useMailboxEvents'
 import { useTheme } from '@/useTheme'
-import type { ConversationDetail, ConversationSummary, MailboxEvent, ServerConfig } from '@/types'
+import type {
+  ConversationDetail,
+  ConversationSummary,
+  MailboxEvent,
+  Message,
+  ReplyResult,
+  ServerConfig,
+} from '@/types'
 
 export default function App() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
@@ -29,6 +36,10 @@ export default function App() {
   const [config, setConfig] = useState<ServerConfig | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [composeOpen, setComposeOpen] = useState(false)
+  const [replyTo, setReplyTo] = useState<Message | undefined>(undefined)
+  // Bumped on every delivery.completed, which is how an open delivery log
+  // refetches itself after a retry from another tab.
+  const [deliveryRevision, setDeliveryRevision] = useState(0)
   const [theme, toggleTheme] = useTheme()
 
   // Held in a ref so the event handler can read the current selection
@@ -96,6 +107,10 @@ export default function App() {
       if (event.type === 'mailbox.cleared') {
         setSelectedId(null)
         setDetail(null)
+      }
+
+      if (event.type === 'delivery.completed') {
+        setDeliveryRevision((current) => current + 1)
       }
 
       // The list is refetched rather than patched: it is one cheap query,
@@ -178,6 +193,37 @@ export default function App() {
     setDetail(null)
     void loadConversations(queryRef.current)
   }, [loadConversations])
+
+  const reply = useCallback((message: Message) => {
+    setReplyTo(message)
+    setComposeOpen(true)
+  }, [])
+
+  // A fresh compose must not be seeded by the last thread that was read.
+  const compose = useCallback(() => {
+    setReplyTo(undefined)
+    setComposeOpen(true)
+  }, [])
+
+  // A reply is always stored, so nothing is lost either way. What is worth
+  // interrupting for is a reply that did not reach the app -- because no route
+  // covered it, or because the app refused it. The thread shows the detail;
+  // this is the notice that there is detail to look at.
+  const onSent = useCallback((result: ReplyResult) => {
+    if (!result.routed) {
+      setError(result.reason ?? 'The reply was stored but not forwarded')
+      return
+    }
+
+    const delivery = result.delivery
+    const refused =
+      delivery && (delivery.error || (delivery.status_code ?? 0) >= 300)
+    setError(
+      refused
+        ? `Your app did not accept the reply: ${delivery.error || delivery.status_code}`
+        : null,
+    )
+  }, [])
 
   const toggleMessage = useCallback((id: string) => {
     setExpanded((current) => {
@@ -264,7 +310,7 @@ export default function App() {
           loading={loading}
           query={query}
           onSelect={selectConversation}
-          onCompose={() => setComposeOpen(true)}
+          onCompose={compose}
           onClearMailbox={clearMailbox}
         />
 
@@ -276,6 +322,8 @@ export default function App() {
               onToggleMessage={toggleMessage}
               onDeleteMessage={deleteMessage}
               onDeleteConversation={deleteConversation}
+              onReply={reply}
+              deliveryRevision={deliveryRevision}
             />
           ) : (
             <EmptyState config={config} />
@@ -295,7 +343,12 @@ export default function App() {
         onSelect={selectConversation}
       />
 
-      <ComposeModal open={composeOpen} onClose={() => setComposeOpen(false)} />
+      <ComposeModal
+        open={composeOpen}
+        onClose={() => setComposeOpen(false)}
+        replyTo={replyTo}
+        onSent={onSent}
+      />
     </div>
   )
 }

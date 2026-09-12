@@ -62,6 +62,66 @@ export interface ConversationDetail {
   messages: Message[]
 }
 
+// Delivery is one attempt to hand a reply to the app under test. Failures are
+// rows too -- when a reply does not arrive, the reason has to be visible.
+export interface Delivery {
+  id: number
+  message_id: string
+  target_url: string
+  format: string
+  attempt: number
+  status_code?: number
+  error?: string
+  duration_ms: number
+  created_at: string
+}
+
+/** Where a reply would be delivered. Never carries the signing key. */
+export interface RouteInfo {
+  matched?: string
+  url: string
+  format: string
+  fallback: boolean
+  has_secret: boolean
+}
+
+export interface ReplyDraft {
+  parent_id?: string
+  from: string
+  to: string[]
+  cc?: string[]
+  bcc?: string[]
+  subject?: string
+  text?: string
+  html?: string
+}
+
+/**
+ * The outcome of sending.
+ *
+ * `routed` means a route matched and a request was made -- not that the app
+ * accepted it. The outcome is `delivery`: its status_code and error. A reply
+ * is stored either way, and `reason` says why an unrouted one went nowhere.
+ */
+export interface ReplyResult {
+  message: Message
+  delivery: Delivery | null
+  route: RouteInfo | null
+  routed: boolean
+  reason?: string
+}
+
+export interface DeliveryList {
+  deliveries: Delivery[]
+  route?: RouteInfo
+}
+
+export interface RouteLookup {
+  routed: boolean
+  route?: RouteInfo
+  reason?: string
+}
+
 export interface WebhookRoute {
   url: string
   format: string

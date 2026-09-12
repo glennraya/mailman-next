@@ -31,12 +31,20 @@ type Ingestor interface {
 	Ingest(ctx context.Context, raw []byte, envelope mailstore.Envelope, direction string) (*mailstore.Message, error)
 }
 
+// Deliverer posts a reply to the application under test and records the
+// attempt. Behind an interface for the same reason Ingestor is: a handler
+// test should not need a socket.
+type Deliverer interface {
+	Send(ctx context.Context, message *mailstore.Message, raw []byte, route config.Resolved) (*mailstore.Delivery, error)
+}
+
 // Options wires the server.
 type Options struct {
 	Store    *mailstore.Store
 	Broker   *events.Broker
 	Config   *config.Config
 	Ingestor Ingestor
+	Webhook  Deliverer
 	Assets   http.Handler
 	Version  string
 	Logger   *slog.Logger
@@ -48,6 +56,7 @@ type Server struct {
 	broker   *events.Broker
 	config   *config.Config
 	ingestor Ingestor
+	webhook  Deliverer
 	assets   http.Handler
 	version  string
 	logger   *slog.Logger
@@ -65,6 +74,7 @@ func New(opts Options) *Server {
 		broker:   opts.Broker,
 		config:   opts.Config,
 		ingestor: opts.Ingestor,
+		webhook:  opts.Webhook,
 		assets:   opts.Assets,
 		version:  opts.Version,
 		logger:   logger,
@@ -78,6 +88,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
+	mux.HandleFunc("GET /api/v1/webhook/route", s.resolveRoute)
 
 	mux.HandleFunc("GET /api/v1/conversations", s.listConversations)
 	mux.HandleFunc("GET /api/v1/conversations/{id}", s.getConversation)
@@ -91,6 +102,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/messages/{id}/raw", s.getMessageRaw)
 	mux.HandleFunc("GET /api/v1/messages/{id}/html", s.getMessageHTML)
 	mux.HandleFunc("POST /api/v1/messages/{id}/seen", s.markMessageSeen)
+	mux.HandleFunc("GET /api/v1/messages/{id}/deliveries", s.listDeliveries)
+	mux.HandleFunc("POST /api/v1/messages/{id}/deliveries", s.retryDelivery)
+
+	mux.HandleFunc("POST /api/v1/replies", s.createReply)
 
 	mux.HandleFunc("GET /api/v1/attachments/{id}", s.getAttachment)
 

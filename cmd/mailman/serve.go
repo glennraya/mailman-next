@@ -19,6 +19,7 @@ import (
 	"github.com/glennraya/mailman/internal/mailmime"
 	"github.com/glennraya/mailman/internal/mailstore"
 	"github.com/glennraya/mailman/internal/smtpd"
+	"github.com/glennraya/mailman/internal/webhook"
 	"github.com/glennraya/mailman/web"
 )
 
@@ -95,6 +96,7 @@ func serve(args []string) error {
 
 	broker := events.New()
 	ingestor := mailmime.NewIngestor(store, broker, logger)
+	sender := webhook.New(webhook.Options{Store: store, Broker: broker, Logger: logger})
 
 	capture := smtpd.New(smtpd.Options{
 		Addr:            cfg.SMTPAddr,
@@ -108,6 +110,7 @@ func serve(args []string) error {
 		Broker:   broker,
 		Config:   cfg,
 		Ingestor: ingestor,
+		Webhook:  sender,
 		Assets:   web.Handler(),
 		Version:  version,
 		Logger:   logger,

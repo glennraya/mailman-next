@@ -98,6 +98,39 @@ Django, `swaks`.
 `AUTH LOGIN` is supported alongside `AUTH PLAIN`, because PHPMailer and most
 WordPress SMTP plugins reach for it first.
 
+## Reply to a message
+
+Open a thread, click **Reply**, and send. Three things happen, in this order:
+
+1. The reply is assembled as real RFC 5322 mail, with a `Message-ID` and the
+   `In-Reply-To` and `References` headers that thread it against what it
+   answers.
+2. It is stored and appears in the thread, marked `sent`. This happens whether
+   or not it can be delivered — a reply is never lost because a webhook is
+   misconfigured.
+3. Mailman looks up the route for the first envelope recipient and posts the
+   reply there, waits for your app, and shows you the answer.
+
+Which recipient decides the route is worth knowing: a reply goes to the
+original's `Reply-To` when it has one, and only otherwise to its `From`. That
+is the whole mechanism behind an address like `order-4471+t3h2@mail.myapp.test`
+— your app puts it in `Reply-To` so an answer comes back to the record rather
+than to a no-reply address. Mailgun's `recipient` and Postmark's
+`OriginalRecipient` and `MailboxHash` are filled in from it.
+
+The delivery is synchronous, so the composer reports what your app actually
+returned rather than closing on a hope. A rejected delivery is not an error in
+Mailman: the reply is in the thread with the status code and your app's own
+response body beneath it, and **Retry** sends it again once you have fixed
+whatever threw. Nothing is retried automatically — when the thing under test is
+your own handler, a silent second attempt is noise.
+
+A reply to an address no route covers is stored and says so, in the composer
+before you send and in the thread afterwards. It is never reported as
+delivered.
+
+Replies cannot carry attachments yet.
+
 ## How it works
 
 One binary, one process, two listeners over one SQLite file:
@@ -123,6 +156,11 @@ arrives rather than on a poll.
 
 ## Features
 
+- **The reply loop** — write a reply in the inbox and Mailman delivers it to
+  your app as an inbound-email webhook, routed by the recipient's domain, in
+  Mailgun's, Postmark's or Mailman's own shape. Every attempt is recorded with
+  the status code, the duration and whatever your app said back, and any of
+  them can be sent again.
 - **Threading** — replies group by `In-Reply-To` and `References`, with a
   reply-prefix subject fallback. Two unrelated mails that merely share a
   subject stay apart, which is what keeps transactional mail readable.
@@ -174,6 +212,35 @@ Scalars can also be set with `MAILMAN_WEBHOOK_URL`, `MAILMAN_WEBHOOK_FORMAT`,
 `MAILMAN_WEBHOOK_SIGNING_KEY`, `MAILMAN_WEBHOOK_TIMEOUT` and
 `MAILMAN_WEBHOOK_VERIFY_TLS`, which take precedence over the file.
 
+### What each format posts
+
+| `format` | Body | Authenticated with |
+|---|---|---|
+| `generic` | `application/json` — the parsed message, its headers in order, and the verbatim `.eml` under `raw` | `X-Mailman-Signature: sha256=<hex>`, an HMAC over the exact request body |
+| `mailgun` | `multipart/form-data` — `recipient`, `sender`, `from`, `subject`, `body-plain`, `body-html`, `stripped-text`, `stripped-signature`, `message-headers`, `domain`, `attachment-count`, plus **every MIME header as its own field** (`Message-Id`, `In-Reply-To`, `References`, …) and `X-Mailgun-Incoming: Yes` | `signature`, `timestamp` and `token` **in the body**, where `signature` is `HMAC-SHA256(key, timestamp + token)` — what Mailgun's own verification helpers recompute |
+| `postmark` | `application/json` — `From`/`FromFull`, `To`/`ToFull`, `Cc`, `Bcc`, `OriginalRecipient`, `MailboxHash`, `Subject`, `MessageID`, `TextBody`, `HtmlBody`, `StrippedTextReply`, `Headers` | HTTP Basic, the way Postmark's inbound URLs are secured — Postmark signs nothing, so a `signing_key` on a Postmark route is sent as the Basic user |
+
+The per-header fields are not redundancy: handlers read them directly, and a
+gate as ordinary as `isset($data['In-Reply-To'])` drops a reply that arrives
+without them. `message-headers` is the complete, ordered record; the individual
+fields are what code actually indexes.
+
+Two details of the Postmark shape are faithful rather than convenient, because
+a production handler depends on both: `MessageID` is a Postmark-style UUID, not
+the mail's `Message-ID` — that travels in `Headers`, where Postmark puts it —
+and `Headers` omits the fields promoted to the top level.
+
+Set `signing_key` to whatever your app already verifies against and its
+existing handler works unchanged. With no key configured, Mailgun's `signature`
+field is omitted rather than computed from an empty one: a verifying handler
+then fails for an obvious reason instead of a mysterious one.
+
+Two limits worth knowing. A blank `signing_key` on a route inherits the
+top-level one, so there is no way to say "this one route is unsigned" while a
+key exists above it. And config is read at startup, so editing `config.json`
+takes a restart — the reply keeps in the database until then, and **Retry** is
+still there to click.
+
 ## JSON API
 
 No authentication — it is a localhost tool. Useful for CI assertions.
@@ -191,10 +258,21 @@ No authentication — it is a localhost tool. Useful for CI assertions.
 | DELETE | `/api/v1/messages/{id}` | Delete one message |
 | POST | `/api/v1/messages` | Inject mail (`{raw}` or `{from,to[],subject,text,html}`) |
 | DELETE | `/api/v1/messages` | Empty the mailbox (CI reset) |
+| POST | `/api/v1/replies` | Send a reply and deliver it (`{parent_id,from,to[],cc[],bcc[],subject,text,html}`) |
+| GET | `/api/v1/messages/{id}/deliveries` | Every webhook attempt for one reply |
+| POST | `/api/v1/messages/{id}/deliveries` | Send it again |
+| GET | `/api/v1/webhook/route?recipient=` | Where a reply to an address would go |
 | GET | `/api/v1/attachments/{id}` | Download a part |
 | GET | `/api/v1/config` | Effective settings, including webhook routes |
 | GET | `/api/v1/events` | WebSocket event stream |
 | GET | `/healthz` | Liveness |
+
+`POST /api/v1/replies` answers `201` with the stored message, the delivery
+attempt and the route it followed. It answers `201` even when your app refused
+the reply: the message was still written, and `delivery.status_code` and
+`delivery.error` are the outcome. `routed` is false only when no route matched
+at all, and `reason` then says so — so a CI assertion can tell "my handler
+threw" from "Mailman had nowhere to send it".
 
 Writes are protected against cross-origin requests, since Mailman listens on
 loopback while you browse the rest of the web. Safe methods are unaffected.
@@ -223,7 +301,11 @@ anything under `web/src` — CI fails if it is stale.
 
 ## Status
 
-Capture, storage, threading, the API, the live inbox and the read UI are done.
-The reply loop — composing a reply, routing it by domain and posting it to your
-app as an inbound webhook, with every attempt logged and retryable — is the
-next milestone.
+The loop is closed. Capture, storage, threading, the API, the live inbox, the
+read UI, and replying — routed by domain, posted to your app as an inbound
+webhook in any of the three shapes, with every attempt logged and retryable —
+all work.
+
+Still to come: attachments on replies, which the message builder already
+handles but the composer has no file picker for; automatic retry with backoff;
+and picking up a changed `config.json` without a restart.

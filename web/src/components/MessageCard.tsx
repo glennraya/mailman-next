@@ -6,10 +6,12 @@ import {
   Image as ImageIcon,
   ImageOff,
   Paperclip,
+  Reply,
   Trash2,
 } from 'lucide-react'
 
 import { api } from '@/api'
+import { DeliveryStatus } from '@/components/DeliveryStatus'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -25,9 +27,19 @@ interface Props {
   expanded: boolean
   onToggle: () => void
   onDelete: (id: string) => void
+  onReply: (message: Message) => void
+  /** Bumped when a delivery for this message completes anywhere. */
+  deliveryRevision: number
 }
 
-export function MessageCard({ message, expanded, onToggle, onDelete }: Props) {
+export function MessageCard({
+  message,
+  expanded,
+  onToggle,
+  onDelete,
+  onReply,
+  deliveryRevision,
+}: Props) {
   const [blockImages, setBlockImages] = useState(false)
   const [tab, setTab] = useState<'html' | 'text'>(message.html_body ? 'html' : 'text')
 
@@ -36,6 +48,7 @@ export function MessageCard({ message, expanded, onToggle, onDelete }: Props) {
   const files = message.attachments?.filter((a) => !a.inline) ?? []
   const hasHeaderExtras =
     Boolean(message.cc?.length) || Boolean(message.bcc?.length) || Boolean(message.reply_to?.length)
+  const outbound = message.direction === 'outbound'
 
   return (
     <Collapsible open={expanded} onOpenChange={onToggle} asChild>
@@ -57,7 +70,7 @@ export function MessageCard({ message, expanded, onToggle, onDelete }: Props) {
             <span className="min-w-0 flex-1">
               <span className="flex items-baseline gap-2">
                 <span className="truncate text-sm font-medium">{displayName(sender)}</span>
-                {message.direction === 'outbound' && (
+                {outbound && (
                   <Badge variant="outline" className="h-4 px-1.5 text-[11px] text-muted-foreground">
                     sent
                   </Badge>
@@ -133,6 +146,18 @@ export function MessageCard({ message, expanded, onToggle, onDelete }: Props) {
                   </Tooltip>
                 )}
 
+                {/* Replying is the whole point of the inbox, so it is not
+                    hidden behind the compose button in the sidebar. */}
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="text-muted-foreground"
+                  onClick={() => onReply(message)}
+                >
+                  <Reply aria-hidden />
+                  Reply
+                </Button>
+
                 <Button variant="ghost" size="xs" className="text-muted-foreground" asChild>
                   <a href={api.rawUrl(message.id)} target="_blank" rel="noreferrer">
                     <FileText aria-hidden />
@@ -172,6 +197,9 @@ export function MessageCard({ message, expanded, onToggle, onDelete }: Props) {
               </pre>
             </TabsContent>
           </Tabs>
+
+          {/* Only mail Mailman sent has anywhere to have been delivered. */}
+          {outbound && <DeliveryStatus messageId={message.id} revision={deliveryRevision} />}
 
           {files.length > 0 && (
             <div className="flex flex-wrap gap-2 border-t px-4 py-3">

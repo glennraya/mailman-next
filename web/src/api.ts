@@ -1,4 +1,13 @@
-import type { ConversationDetail, ConversationList, Message, ServerConfig } from '@/types'
+import type {
+  ConversationDetail,
+  ConversationList,
+  DeliveryList,
+  Message,
+  ReplyDraft,
+  ReplyResult,
+  RouteLookup,
+  ServerConfig,
+} from '@/types'
 
 // In development the Vite proxy forwards these to the Go server; in the
 // built binary the SPA and the API share an origin, so a relative path is
@@ -64,6 +73,26 @@ export const api = {
     ),
 
   clearMailbox: () => request<{ deleted: number }>('/messages', { method: 'DELETE' }),
+
+  // Sending is the only request with a body, so the only one that needs a
+  // Content-Type. It answers 201 even when the app under test rejected the
+  // delivery: the reply was still written, and the rejection is in `delivery`.
+  reply: (draft: ReplyDraft) =>
+    request<ReplyResult>('/replies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft),
+    }),
+
+  deliveries: (messageId: string) => request<DeliveryList>(`/messages/${messageId}/deliveries`),
+
+  retryDelivery: (messageId: string) =>
+    request<ReplyResult>(`/messages/${messageId}/deliveries`, { method: 'POST' }),
+
+  // Asked as the recipient is typed, so the wildcard and inheritance rules
+  // live in one place -- Go -- rather than being reimplemented here.
+  route: (recipient: string) =>
+    request<RouteLookup>(`/webhook/route?recipient=${encodeURIComponent(recipient)}`),
 
   // Served as documents and files rather than JSON, so these are URLs the
   // browser fetches directly.

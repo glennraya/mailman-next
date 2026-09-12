@@ -1,4 +1,4 @@
-import { Trash2 } from 'lucide-react'
+import { Reply, Trash2 } from 'lucide-react'
 
 import { MessageCard } from '@/components/MessageCard'
 import {
@@ -15,7 +15,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import type { ConversationDetail } from '@/types'
+import type { ConversationDetail, Message } from '@/types'
 
 interface Props {
   detail: ConversationDetail
@@ -23,6 +23,8 @@ interface Props {
   onToggleMessage: (id: string) => void
   onDeleteMessage: (id: string) => void
   onDeleteConversation: (id: number) => void
+  onReply: (message: Message) => void
+  deliveryRevision: number
 }
 
 export function ThreadView({
@@ -31,8 +33,15 @@ export function ThreadView({
   onToggleMessage,
   onDeleteMessage,
   onDeleteConversation,
+  onReply,
+  deliveryRevision,
 }: Props) {
   const { conversation, messages } = detail
+
+  // Replying to the newest inbound message is what a reader almost always
+  // means by "reply to this thread". Replying to one of Mailman's own replies
+  // would address the wrong side of the conversation.
+  const answerable = messages.filter((m) => m.direction === 'inbound').at(-1)
 
   return (
     <div className="flex h-full flex-col">
@@ -45,6 +54,13 @@ export function ThreadView({
             {messages.length} {messages.length === 1 ? 'message' : 'messages'}
           </p>
         </div>
+
+        {answerable && (
+          <Button variant="outline" size="sm" onClick={() => onReply(answerable)}>
+            <Reply aria-hidden />
+            Reply
+          </Button>
+        )}
 
         <AlertDialog>
           <Tooltip>
@@ -93,6 +109,8 @@ export function ThreadView({
               expanded={expanded.has(message.id)}
               onToggle={() => onToggleMessage(message.id)}
               onDelete={onDeleteMessage}
+              onReply={onReply}
+              deliveryRevision={deliveryRevision}
             />
           ))}
         </div>
